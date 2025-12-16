@@ -13,7 +13,14 @@ Instead, both sides use the passcode as a mathematical basis to calculate two se
 The passcode (e.g., `12345678`) is too weak for direct cryptography. Therefore, it is "hardened".
 The device ("Responder") provides a random **Salt** and a number of **Iterations**.
 
-![PBKDF Flow](images/pbkdf.png)
+```mermaid
+flowchart LR
+    Passcode["Passcode (12345678)"] --> PBKDF2
+    Salt["Salt (from Device)"] --> PBKDF2
+    Iter["Iterations"] --> PBKDF2
+    PBKDF2 --> W0["W0 (Verifier 1)"]
+    PBKDF2 --> W1["W1 (Verifier 2/L)"]
+```
 *   **W0 & W1** are large numbers (points on an elliptic curve) needed for the SPAKE2+ calculation.
 *   Both sides must calculate `W0` and `W1`. To do this, the Controller must first query the Salt and Iterations from the device.
 
@@ -23,7 +30,36 @@ The device ("Responder") provides a random **Salt** and a number of **Iterations
 
 Here is the flow as implemented in the `commissioning` package:
 
-![PASE Handshake](images/pase_sequence.png)
+```mermaid
+sequenceDiagram
+    participant C as Controller (Initiator)
+    participant D as Device (Responder)
+
+    Note over C, D: Neither Keys nor Passcode<br/>are transmitted!
+
+    C->>D: 1. PBKDFParamRequest
+    Note left of C: "Hello, I want to pair.<br/>Give me Salt & Iterations!"
+    
+    D->>C: 2. PBKDFParamResponse
+    Note right of D: "Here are my Salt,<br/>Iterations & Session ID."
+
+    Note over C: C calculates W0 & W1<br/>from Passcode + Salt
+
+    C->>D: 3. Pake1 (pA)
+    Note left of C: Sends "Share P"<br/>(A calculated Curve Point)
+
+    Note over D: D calculates W0 & W1<br/>D validates pA
+
+    D->>C: 4. Pake2 (pB, cB)
+    Note right of D: Sends "Share V"<br/>and Confirmation (Hash)
+
+    Note over C: C validates pB & Hash.<br/>Calculates Shared Secret (Ke).
+
+    C->>D: 5. Pake3 (cA)
+    Note left of C: Sends Confirmation (Hash),<br/>that C also has the Secret.
+
+    Note over C, D: Handshake Successful!<br/>Session Keys derived from Ke.
+```
 
 ### Detailed Explanation of Messages
 
@@ -70,5 +106,10 @@ The Session Key is created at the very end in a "Key Derivation Function" (KDF).
 1.  **The Shared Secret (Z):** The mathematical result of SPAKE2+ (which can only be calculated if both know the passcode).
 2.  **The Hash Values (Transcript):** A hash over all messages sent back and forth (`PBKDFParamRequest`, `Random`, `pA`, `pB`, etc.).
 
-![Key Derivation](images/key_derivation.png)
+```mermaid
+flowchart TD
+    Z["SPAKE2+ Result (Z)"] --> KDF
+    Transcript["Transcript Hash (Nonces, pA, pB...)"] --> KDF
+    KDF --> SessionKey["Session Key (Ke)"]
+```
 The result `Ke` is then split into encryption keys for both directions (I2RKey, R2IKey).
