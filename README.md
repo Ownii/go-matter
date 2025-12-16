@@ -5,6 +5,9 @@ The goal is to create a functional, understandable, and modular SDK that covers 
 
 The project is currently in the **Scaffolding / Prototyping Phase**.
 
+> [!NOTE]
+> This SDK is being developed in an AI-driven process with **Google DeepMind's Antigravity**.
+
 ## 🏗 Project Status
 
 ### ✅ Implemented
