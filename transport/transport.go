@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"fmt"
 	"net"
 )
 
@@ -14,17 +15,28 @@ type MessageSecurity interface {
 	DecryptPayload(sessionID uint16, ciphertext []byte, header []byte) ([]byte, error)
 }
 
+// ReadHandler defines the callback for received packets.
+type ReadHandler func(payload []byte, from *net.UDPAddr)
+
 // TransportManager handles sending and receiving messages over UDP.
 type TransportManager struct {
 	conn            *net.UDPConn
 	security        MessageSecurity
-	unackedMessages map[uint32]interface{} // TODO: Define proper struct for tracking messages
+	unackedMessages map[uint32]interface{}
 }
 
 // NewTransportManager creates a new TransportManager listening on the specified port.
 func NewTransportManager(port int, security MessageSecurity) (*TransportManager, error) {
-	// TODO: Initialize UDP connection
+	addr := &net.UDPAddr{
+		Port: port,
+		IP:   net.ParseIP("0.0.0.0"),
+	}
+	conn, err := net.ListenUDP("udp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to listen on udp port %d: %w", port, err)
+	}
 	return &TransportManager{
+		conn:     conn,
 		security: security,
 	}, nil
 }
@@ -32,23 +44,31 @@ func NewTransportManager(port int, security MessageSecurity) (*TransportManager,
 // Send sends a message to the specified address.
 // It handles MRP (Message Reliability Protocol) logic if reliable delivery is requested.
 func (tm *TransportManager) Send(addr *net.UDPAddr, payload []byte, reliable bool) error {
-	// TODO: Implement sending logic
-	// 1. Construct Message Header
-	// 2. Encrypt Payload using tm.security
-	// 3. Send via UDP
-	// 4. If reliable, track for ACKs and retries
-	return nil
+	// TODO: Use security to encrypt payload?
+	// For now, raw send for PASE sample scaffold
+	_, err := tm.conn.WriteToUDP(payload, addr)
+	return err
 }
 
-// Listen starts the receiving loop.
-func (tm *TransportManager) Listen() error {
-	// TODO: Implement receive loop
-	// 1. Read from UDP
-	// 2. Parse Header
-	// 3. Decrypt Payload using tm.security
-	// 4. Handle ACKs
-	// 5. Pass payload to upper layer (needs a callback or channel)
-	return nil
+// Start starts the receiving loop.
+func (tm *TransportManager) Start(handler ReadHandler) error {
+	buf := make([]byte, 2048)
+	for {
+		n, addr, err := tm.conn.ReadFromUDP(buf)
+		if err != nil {
+			return err
+		}
+
+		// Copy payload
+		payload := make([]byte, n)
+		copy(payload, buf[:n])
+
+		// TODO: Decrypt using tm.security?
+
+		if handler != nil {
+			handler(payload, addr)
+		}
+	}
 }
 
 // Close closes the transport connection.
