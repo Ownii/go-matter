@@ -1,71 +1,70 @@
 # Go-Matter SDK
 
-Dieses Projekt ist eine Implementierung des Matter Smart Home Protokoll-Standards in Go.
-Ziel ist es, ein funktionierendes, verständliches und modulares SDK zu erstellen, welches sowohl die Device-Seite (Accessories) als auch die Controller-Seite (Commissioners/Fabric Admins) abdeckt.
+This project is an implementation of the Matter Smart Home Protocol Standard in Go.
+The goal is to create a functional, understandable, and modular SDK that covers both the Device side (Accessories) and the Controller side (Commissioners/Fabric Admins).
 
-Das Projekt befindet sich aktuell in der **Scaffolding / Prototyping Phase**.
+The project is currently in the **Scaffolding / Prototyping Phase**.
 
-## 🏗 Status des Projekts
+## 🏗 Project Status
 
-### ✅ Implementiert
+### ✅ Implemented
 
 *   **TLV (Tag-Length-Value)**
-    *   Vollständiger `Encoder` und `Decoder` für Matter-konformes TLV.
-    *   Unterstützung für Basis-Typen, Container (Structs, Arrays, Lists) und `omitempty`.
-    *   Unit Tests und Loopback-Verification.
+    *   Complete `Encoder` and `Decoder` for Matter-compliant TLV.
+    *   Support for basic types, containers (Structs, Arrays, Lists), and `omitempty`.
+    *   Unit tests and loopback verification.
 *   **Transport Layer (Basis)**
-    *   Grundlegendes UDP-Framework (`TransportManager`).
-    *   Senden und Empfangen von Nachrichten per Callback-Handler.
+    *   Basic UDP framework (`TransportManager`).
+    *   Sending and receiving messages via callback handlers.
 *   **Commissioning (PASE - Passcode Authenticated Session Establishment)**
-    *   Grundgerüst für die PASE State Machine.
-    *   Data Structs für `PBKDFParamRequest` und `PBKDFParamResponse` mit TLV-Tags.
-    *   Logic für den Austausch der ersten Handshake-Nachrichten.
+    *   Skeleton for the PASE State Machine.
+    *   Data Structs for `PBKDFParamRequest` and `PBKDFParamResponse` with TLV tags.
+    *   Logic for exchanging the initial handshake messages.
 *   **Samples**
-    *   `samples/commissioning/device`: Ein Beispielgerät, das auf UDP lauscht und PASE-Anfragen beantwortet (Stub).
-    *   `samples/commissioning/controller`: Ein Beispielcontroller, der den Handshake initiiert.
+    *   `samples/commissioning/device`: A sample device listening on UDP and answering PASE requests (Stub).
+    *   `samples/commissioning/controller`: A sample controller initiating the handshake.
 
-### 🚧 In Arbeit / Geplant
+### 🚧 In Progress / Planned
 
-1.  **Kryptografie vervollständigen**
-    *   Vollständige Integration von **SPAKE2+** (via `crypto` Package).
-    *   Berechnung des Shared Secrets und Ableitung der Session Keys (HKDF).
-    *   AES-CCM Verschlüsselung der Transport-Payloads.
-2.  **Commissioning Abschließen**
-    *   Implementierung der `HandleMessage` Logik für alle PASE-Schritte (Pake1, Pake2, Pake3).
-    *   Verifizierung der Kryptografischen Proofs.
+1.  **Complete Cryptography**
+    *   Full integration of **SPAKE2+** (via `crypto` package).
+    *   Calculation of Shared Secrets and derivation of Session Keys (HKDF).
+    *   AES-CCM encryption of transport payloads.
+2.  **Finish Commissioning**
+    *   Implementation of `HandleMessage` logic for all PASE steps (Pake1, Pake2, Pake3).
+    *   Verification of cryptographic proofs.
 3.  **Session Management**
-    *   Verwaltung von sicheren Sessions nach dem Handshake.
+    *   Management of secure sessions after the handshake.
 4.  **Application Layer**
-    *   Implementation des Interaction Models (Read/Write/Invoke).
-    *   Datenmodell für Cluster und Attribute.
+    *   Implementation of the Interaction Model (Read/Write/Invoke).
+    *   Data model for Clusters and Attributes.
 
-## 🚀 Nutzung
+## 🚀 Usage
 
-### Voraussetzungen
-*   Go 1.20 oder neuer
+### Prerequisites
+*   Go 1.20 or newer
 
-### Samples ausführen
+### Running the Samples
 
-Komiliere und starte das Device:
+Compile and start the Device:
 ```bash
 go run samples/commissioning/device/main.go
-# Ausgabe: Device listening on 5540...
+# Output: Device listening on 5540...
 ```
 
-Starten den Controller (in einem neuen Terminal):
+Start the Controller (in a new terminal):
 ```bash
 go run samples/commissioning/controller/main.go
-# Ausgabe: Starting Matter Controller Sample...
-# Ausgabe: Sending PBKDFParamRequest...
+# Output: Starting Matter Controller Sample...
+# Output: Sending PBKDFParamRequest...
 ```
 
-## 📂 Projektstruktur
+## 📂 Project Structure
 
-*   `tlv/`: Encoder & Decoder für das Matter Binärformat.
-*   `crypto/`: Wrapper für kryptografische Primitive (AES, HKDF, SPAKE2+).
-*   `commissioning/`: Logik für das Pairing (PASE & CASE).
-*   `transport/`: UDP Netzwerkkommunikation.
-*   `samples/`: Ausführbare Beispielanwendungen.
-*   `docs/`: Dokumentation und Diagramme (z.B. PASE Explainer).
-*   `bin/`: Kompilierte Binaries (werden von git ignoriert).
-
+*   `tlv/`: Encoder & Decoder for the Matter binary format.
+*   `crypto/`: Wrapper for cryptographic primitives (AES, HKDF, SPAKE2+).
+*   `commissioning/`: Logic for pairing (PASE & CASE).
+*   `transport/`: UDP network communication.
+*   `samples/`: Executable sample applications.
+*   `docs/`: Documentation and diagrams (e.g., PASE Explainer).
+*   `bin/`: Compiled binaries (ignored by git).
