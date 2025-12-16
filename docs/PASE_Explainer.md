@@ -1,74 +1,74 @@
-# PASE (Passcode Authenticated Session Establishment) Erklärung
+# PASE (Passcode Authenticated Session Establishment) Explanation
 
-PASE ist das Protokoll, das Matter nutzt, um eine **erste sichere Verbindung** zwischen einem Controller (Dir/Commissioner) und einem neuen Gerät (Commissionee) herzustellen. Da sich die Geräte noch nicht kennen und keine Zertifikate ausgetauscht haben, basiert das Vertrauen auf einem **Setup Passcode** (der 8-stellige Code auf dem Gerät/QR-Code).
+PASE is the protocol used by Matter to establish an **initial secure connection** between a Controller (You/Commissioner) and a new Device (Commissionee). Since the devices do not know each other yet and have exchanged no certificates, trust is based on a **Setup Passcode** (the 8-digit code on the device/QR code).
 
-## Das Kern-Konzept: SPAKE2+
+## The Core Concept: SPAKE2+
 
-Matter nutzt **SPAKE2+** (Simple Password Authenticated Key Exchange). Das Geniale daran: **Der Passcode wird niemals über das Netzwerk gesendet.**
+Matter uses **SPAKE2+** (Simple Password Authenticated Key Exchange). The genius part: **The passcode is never sent over the network.**
 
-Stattdessen nutzen beide Seiten den Passcode als mathematische Basis, um zwei Geheimnisse zu berechnen. Wenn beide Seiten den gleichen Passcode haben, kommen sie am Ende der Berechnung auf den gleichen "Shared Secret Key". Wenn einer lügt oder den falschen Code hat, passt das Ergebnis nicht zusammen und der Handshake schlägt fehl.
+Instead, both sides use the passcode as a mathematical basis to calculate two secrets. If both sides have the same passcode, they arrive at the same "Shared Secret Key" at the end of the calculation. If one lies or uses the wrong code, the results do not match, and the handshake fails.
 
-### Schritt 1: Vom Passcode zu kryptografischen Parametern (PBKDF)
+### Step 1: From Passcode to Cryptographic Parameters (PBKDF)
 
-Der Passcode (z.B. `12345678`) ist zu schwach für direkte Kryptografie. Deshalb wird er "gehärtet".
-Das Gerät ("Responder") liefert einen zufälligen **Salt** und eine Anzahl von **Iterationen**.
+The passcode (e.g., `12345678`) is too weak for direct cryptography. Therefore, it is "hardened".
+The device ("Responder") provides a random **Salt** and a number of **Iterations**.
 
 ![PBKDF Flow](images/pbkdf.png)
-*   **W0 & W1** sind große Zahlen (Punkte auf einer elliptischen Kurve), die für die SPAKE2+ Berechnung benötigt werden.
-*   Beide Seiten müssen `W0` und `W1` berechnen. Dafür muss der Controller zuerst den Salt und die Iterations vom Gerät abfragen.
+*   **W0 & W1** are large numbers (points on an elliptic curve) needed for the SPAKE2+ calculation.
+*   Both sides must calculate `W0` and `W1`. To do this, the Controller must first query the Salt and Iterations from the device.
 
 ---
 
-## Der PASE Handshake Ablauf
+## The PASE Handshake Flow
 
-Hier ist der Ablauf, wie er im `commissioning` Paket implementiert wird:
+Here is the flow as implemented in the `commissioning` package:
 
 ![PASE Handshake](images/pase_sequence.png)
 
-### Detaillierte Erklärung der Nachrichten
+### Detailed Explanation of Messages
 
-1.  **PBKDFParamRequest**: Der Controller startet und sagt "Lass uns anfangen". Er schickt eine zufällige Nonce ("Initiator Random").
-2.  **PBKDFParamResponse**: Das Gerät antwortet mit den Zutaten, die der Controller braucht, um den Passcode in `W0`/`W1` umzuwandeln.
-3.  **Pake1**: Der Controller wählt eine Zufallszahl (x), verrechnet sie mit `W0` und schickt das Ergebnis (Punkt `pA` bzw. `X`) an das Gerät.
-4.  **Pake2**: Das Gerät wählt eine Zufallszahl (y), verrechnet sie mit `W0`, und schickt das Ergebnis (Punkt `pB` bzw. `Y`). Zusätzlich schickt es einen Hash (`cB`), der beweist: "Ich kenne den Passcode (W0/W1) und habe dein `pA` gesehen."
-5.  **Pake3**: Der Controller prüft den Hash. Wenn korrekt, schickt er seinen Hash (`cA`) zurück: "Ich kenne auch den Passcode und habe dein `pB` gesehen."
+1.  **PBKDFParamRequest**: The Controller starts and says "Let's begin". It sends a random nonce ("Initiator Random").
+2.  **PBKDFParamResponse**: The device responds with the ingredients the Controller needs to convert the passcode into `W0`/`W1`.
+3.  **Pake1**: The Controller chooses a random number (x), computes with `W0`, and sends the result (Point `pA` or `X`) to the device.
+4.  **Pake2**: The device chooses a random number (y), computes with `W0`, and sends the result (Point `pB` or `Y`). Additionally, it sends a hash (`cB`) proving: "I know the passcode (W0/W1) and have seen your `pA`."
+5.  **Pake3**: The Controller verifies the hash. If correct, it sends its hash (`cA`) back: "I also know the passcode and have seen your `pB`."
 
-## Ergebnis: Verschlüsselung
+## Result: Encryption
 
-Am Ende haben beide Seiten (ohne den Passcode je gesendet zu haben) ein gemeinsames Geheimnis **Ke** (Session Key) berechnet.
-Ab jetzt werden alle Nachrichten mit diesem **Ke** und **AES-CCM** verschlüsselt.
+At the end, both sides (without ever sending the passcode) have calculated a shared secret **Ke** (Session Key).
+From now on, all messages are encrypted with this **Ke** using **AES-CCM**.
 
-### Detaillierte Antworten auf deine Fragen
+### Detailed Answers to Specific Questions
 
-#### 1. "Iterationen" – Was ist das und woher kommt es?
-*   **Was ist es?** Eine Zahl (z.B. 2000), die angibt, wie oft der Passcode durch eine Hash-Funktion "gedreht" wird (PBKDF2 Algorithmus).
-*   **Zweck:** Es macht den Passcode künstlich langsam zu berechnen. Das schützt gegen Brute-Force-Angriffe, falls ein Angreifer den Salt klaut. Für den User merkt man bei 1x vs 1000x kaum einen Unterschied, aber ein Hacker, der Milliarden Passwörter pro Sekunde probieren will, wird 1000x verlangsamt.
-*   **Ursprung:** Der **Gerätehersteller** legt diesen Wert fest (Hardcoded in der Firmware oder Config). Der Controller fragt ihn im ersten Schritt (`PBKDFParamRequest`) ab, damit er die gleiche Rechnung durchführen kann. Matter schreibt ein Minimum vor (typischerweise min. 1000).
+#### 1. "Iterations" – What is getting iterated?
+*   **What is it?** A number (e.g., 2000) indicating how many times the passcode is "spun" through a hash function (PBKDF2 algorithm).
+*   **Purpose:** It makes calculating the passcode artificially slow. This protects against brute-force attacks if an attacker steals the Salt. A user barely notices the difference between 1x vs 1000x, but a hacker trying billions of passwords per second is slowed down 1000x.
+*   **Origin:** The **Device Manufacturer** sets this value (hardcoded in firmware or config). The Controller requests it in the first step (`PBKDFParamRequest`) to perform the same calculation. Matter mandates a minimum (typically min. 1000).
 
-#### 2. "Initiator Random" (Nonce) – Wozu dient er?
-*   Er fließt in den "Context" des Handshakes ein.
-*   Am Ende des Handshakes wird der Session Key nicht nur aus dem mathematischen Ergebnis von SPAKE2+ berechnet, sondern es fließt auch das **Transkript** (die Summe aller ausgetauschten Daten) mit ein.
-*   **Zweck:** Da der `Random` jedes Mal anders ist, ist auch der **Session Key jedes Mal komplett anders**, selbst wenn man das gleiche Gerät mit dem gleichen Passcode nochmal pairt. Das verhindert "Replay-Attacken" (ein Angreifer kann nicht einfach eine alte aufgezeichnete Session nochmal abspielen).
+#### 2. "Initiator Random" (Nonce) – What is it for?
+*   It feeds into the "Context" of the handshake.
+*   At the end of the handshake, the Session Key is derived not just from the mathematical result of SPAKE2+, but also from the **Transcript** (the sum of all exchanged data).
+*   **Purpose:** Since `Random` is different every time, the **Session Key is completely different every time**, even if pairing the same device with the same passcode again. This prevents "Replay Attacks" (an attacker cannot simply replay an old recorded session).
 
-#### 3. Validiert das Gerät `pA`? Nutzt es ihn für `pB`?
-*   **Validierung:** Ja! Das Gerät prüft mathematisch, ob der Punkt `pA` tatsächlich auf der elliptischen Kurve liegt. Wenn `pA` ungültig ist (z.B. Infinity-Point oder falsche Koordinaten), bricht das Gerät sofort ab.
-*   **Nutzung:** Das Gerät nutzt `pA` **nicht**, um sein eigenes `pB` zu berechnen. `pB` basiert nur auf dem eigenen Zufallswert `y` und dem Passcode-Parameter `W0`.
-*   **Aber:** Das Gerät nutzt `pA`, um das **gemeinsame Geheimnis (Z)** zu berechnen.
-    *   Formel vereinfacht: `Z = h * y * (pA - W0*M)`
-    *   Du siehst: Ohne das `pA` vom Controller kann das Gerät das Geheimnis `Z` nicht berechnen.
+#### 3. Does the Device validate `pA`? Does it use it for `pB`?
+*   **Validation:** Yes! The device mathematically verifies if point `pA` actually lies on the elliptic curve. If `pA` is invalid (e.g., Infinity Point or wrong coordinates), the device aborts immediately.
+*   **Usage:** The device does **not** use `pA` to calculate its own `pB`. `pB` is based only on its own random value `y` and the passcode parameter `W0`.
+*   **However:** The device uses `pA` to calculate the **Shared Secret (Z)**.
+    *   Simplified Formula: `Z = h * y * (pA - W0*M)`
+    *   You see: Without `pA` from the Controller, the device cannot calculate the secret `Z`.
 
-    **Erklärung der Variablen:**
-    *   **h (Cofactor):** Ein fester Wert der elliptischen Kurve (bei P-256 ist h=1). Er spielt für die Sicherheit eine Rolle, ist aber technisch gesehen eine Konstante.
-    *   **y (Ephemeral Private Key):** Die **geheime Zufallszahl** des Geräts (Responders), die es für diesen einen Handshake gewürfelt hat. Das Gegenstück beim Controller ist `x`.
-    *   **M & N (Protocol Constants):** Das sind zwei feste, öffentlich bekannte Punkte auf der Kurve, die im SPAKE2+ Standard definiert sind. Sie haben nichts mit dem Passwort zu tun, sondern sind "Ankerpunkte" für die Mathematik.
-        *   Der Controller nutzt `M` zur Berechnung.
-        *   Das Gerät nutzt `N` zur Berechnung.
-    *   **pA (Public Key A):** Die Nachricht vom Controller.
+    **Explanation of Variables:**
+    *   **h (Cofactor):** A fixed value of the elliptic curve (for P-256, h=1). It plays a role in security but is technically a constant.
+    *   **y (Ephemeral Private Key):** The **secret random number** of the device (Responder) rolled for this single handshake. The counterpart at the Controller is `x`.
+    *   **M & N (Protocol Constants):** These are two fixed, publicly known points on the curve defined in the SPAKE2+ standard. They have nothing to do with the password but are "anchor points" for the math.
+        *   The Controller uses `M` for calculation.
+        *   The device uses `N` for calculation.
+    *   **pA (Public Key A):** The message from the Controller.
 
-#### 4. Woraus wird der Session Key berechnet?
-Der Session Key entsteht ganz am Schluss in einer "Key Derivation Function" (KDF). Die Zutaten sind:
-1.  **Das Shared Secret (Z):** Das mathematische Ergebnis von SPAKE2+ (das, was nur berechnet werden kann, wenn beide den Passcode kennen).
-2.  **Die Hash-Werte (Transcript):** Ein Hash über alle Nachrichten, die hin und her geschickt wurden (`PBKDFParamRequest`, `Random`, `pA`, `pB` usw.).
+#### 4. How is the Session Key calculated?
+The Session Key is created at the very end in a "Key Derivation Function" (KDF). The ingredients are:
+1.  **The Shared Secret (Z):** The mathematical result of SPAKE2+ (which can only be calculated if both know the passcode).
+2.  **The Hash Values (Transcript):** A hash over all messages sent back and forth (`PBKDFParamRequest`, `Random`, `pA`, `pB`, etc.).
 
 ![Key Derivation](images/key_derivation.png)
-Das Ergebnis `Ke` wird dann zerteilt in Encryption-Keys für beide Richtungen (I2RKey, R2IKey).
+The result `Ke` is then split into encryption keys for both directions (I2RKey, R2IKey).

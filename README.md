@@ -68,3 +68,7 @@ go run samples/commissioning/controller/main.go
 *   `samples/`: Executable sample applications.
 *   `docs/`: Documentation and diagrams (e.g., PASE Explainer).
 *   `bin/`: Compiled binaries (ignored by git).
+
+## 📚 Documentation
+
+*   [PASE Protocol Explanation](docs/PASE_Explainer.md): An in-depth look at the initial handshake protocol.
