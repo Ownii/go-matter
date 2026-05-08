@@ -7,18 +7,19 @@ A current-state audit and a recommended order of work to get from the current sc
 | Area | State | Notes |
 |---|---|---|
 | `tlv/` | **Working** | Encoder + decoder + struct tag reflection; only package with tests. Edge cases (FullyQualified tags, List vs Array, floats) are gaps. |
+| `message/` | **Working** | Matter Message Header + Payload Header encode/decode + fluent `Builder`. Round-trip tested. Secured-frame decryption hook is a TODO. |
 | `crypto/` | **Stubbed** | AES-CCM replaced with AES-GCM placeholder; SPAKE2+ wrapper holds `interface{}`; HKDF returns fixed 16 bytes; `NonceGenerator.NextNonce` returns `nil`. |
-| `transport/` | **Partial** | UDP send/receive works. No MRP, no encryption hookup, no Matter message-header parsing. |
+| `transport/` | **Partial** | UDP send/receive operates on `*message.Frame`. No MRP, no encryption hookup. |
 | `session/` | **Stubbed** | `EncryptPayload`/`DecryptPayload` are pass-through. No key derivation, no counter management, no replay window. |
-| `commissioning/` | **Skeleton** | Only `PBKDFParamRequest` is sent. `PBKDFParamResponse` and Pake1/2/3 missing. `Commissionee.HandleMessage` is empty. CASE is one TODO. |
+| `commissioning/` | **Skeleton** | `PBKDFParamRequest` is sent inside a real Matter frame (header + payload header + TLV). `PBKDFParamResponse` and Pake1/2/3 missing. `Commissionee.HandleMessage` receives `*message.Frame` but doesn't dispatch yet. CASE is one TODO. |
 | `discovery/` | **Stubbed** | mDNS advertiser + browser are `return nil` shells. |
 | `interaction/` | **Stubbed** | Read/Write request handlers and senders are TODOs. No Subscribe/Invoke. |
 | `datamodel/` + `model/` | **Skeleton** | Types exist; `Attribute` carries metadata only — no value storage. `DataStore.ReadAttribute` returns `nil, nil`. |
-| `samples/` | **Demo only** | Controller sends one `PBKDFParamRequest`; device prints bytes. No end-to-end completion path. |
-| Tests | `tlv/` only | All other packages have zero coverage. |
+| `samples/` | **Demo only** | Controller sends one framed `PBKDFParamRequest`; device prints opcode + exchange ID + payload. No end-to-end completion path. |
+| Tests | `tlv/` + `message/` | Other packages have zero coverage. |
 | Build/CI | None | No `make`, no GitHub Actions, no lint config. `go build ./...` and `go test ./...` pass. |
 
-The cross-cutting blocker that everything depends on is **the Matter Message Frame format** (Message Header + Payload Header / Exchange Header). It does not exist anywhere in the codebase yet — `transport.Send` writes the raw payload directly to UDP. Fixing this unblocks transport encryption, session counters, exchange tracking, and commissioning state.
+The cross-cutting blocker that everything depended on — the Matter Message Frame format (Message Header + Payload Header / Exchange Header) — now lives in `message/`. `transport.Send` operates on `*message.Frame`, and `commissioning` builds `PBKDFParamRequest` through the fluent `message.Builder`. The next blocker is real crypto (AES-CCM + SPAKE2+) so secured sessions can land.
 
 ---
 
@@ -30,13 +31,13 @@ The cross-cutting blocker that everything depends on is **the Matter Message Fra
 4. **TLV: bufio.Reader** behind `tlv.Reader` to avoid per-byte syscalls when reading from `net.Conn`.
 5. **TLV: tests for nested containers, omitempty, byte string vs UTF-8, and integer width selection.** Currently only one happy-path struct is covered.
 
-## Phase 2 — Matter message framing (critical, unblocks 3-7)
+## Phase 2 — Matter message framing (critical, unblocks 3-7) — **DONE**
 
-6. **Add `message/` (or `frame/`) package** implementing:
-   - **Message Header** (4-byte flags/security, Session ID, Message Counter, optional Source/Dest Node ID) — `Encode`/`Decode` pair.
-   - **Payload Header / Exchange Header** (Exchange Flags, Protocol Opcode, Exchange ID, Protocol ID, optional Ack Counter, Vendor ID).
-   - Constants for protocol IDs (Secure Channel, Interaction Model) and opcodes (`MsgCounterSyncReq`, `PBKDFParamRequest`, `PASE_Pake1`, etc.).
-7. **Wire the framing into `transport.TransportManager`**: `Send` builds the wire packet from `(MessageHeader, PayloadHeader, payload)`; `Start` parses the inverse before invoking the handler. The `ReadHandler` signature should change to receive parsed headers, not raw bytes.
+6. ~~**Add `message/` package**~~ — done. `message/` ships `Header`, `PayloadHeader`, `Frame`, a fluent `Builder`, opcode/protocol constants, and tests. Open follow-ups:
+   - Secured-frame path: `Decode` currently parses the payload header from cleartext bytes; once the session layer can decrypt, `Frame.Encrypted` (or equivalent) needs to gate when the payload header is parsed.
+   - `MsgCounterSyncReq`/`Resp` and full Interaction Model opcode catalogues are not yet defined.
+   - Message extensions (MX flag) are recognised but the variable-length extension blob is not parsed.
+7. ~~**Wire the framing into `transport.TransportManager`**~~ — done. `Send(addr, *message.Frame, reliable)` and `ReadHandler func(*message.Frame, *net.UDPAddr)`. `commissioning.StartPASE` now builds a real frame; both samples log decoded opcode + exchange ID.
 
 ## Phase 3 — Crypto primitives (unblocks 5, 6)
 
@@ -139,8 +140,8 @@ Phase 1 (TLV polish, opportunistically)   Phase 7 (CASE)   ←   Phase 8 (mDNS, 
 
 Strict dependency order, single-developer flat list:
 
-1. **§6** — Add `message/` package with Matter Message Header + Payload Header.
-2. **§7** — Wire framing into `transport`, change `ReadHandler` signature.
+1. ~~**§6** — Add `message/` package with Matter Message Header + Payload Header.~~ **Done.**
+2. ~~**§7** — Wire framing into `transport`, change `ReadHandler` signature.~~ **Done.**
 3. **§8** — AES-CCM in `crypto`.
 4. **§9** — Real `NextNonce`.
 5. **§10** — Real SPAKE2+ context.

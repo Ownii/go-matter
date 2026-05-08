@@ -2,9 +2,11 @@ package main
 
 import (
 	"fmt"
-	"go-matter/commissioning"
-	"go-matter/transport"
 	"net"
+
+	"go-matter/commissioning"
+	"go-matter/message"
+	"go-matter/transport"
 )
 
 func main() {
@@ -25,18 +27,19 @@ func main() {
 	fmt.Printf("Device listening on %d...\n", devicePort)
 
 	// Start Transport and handle messages
-	err = tm.Start(func(payload []byte, from *net.UDPAddr) {
-		fmt.Printf("Device received %d bytes from %s\n", len(payload), from)
+	err = tm.Start(func(frame *message.Frame, from *net.UDPAddr) {
+		fmt.Printf("Device received frame opcode=%#x exchange=%d payload=%d bytes from %s\n",
+			byte(frame.PayloadHeader.Opcode),
+			frame.PayloadHeader.ExchangeID,
+			len(frame.Payload),
+			from)
 
-		// Pass to Commissionee to handle
-		// Since HandleMessage is a stub in current SDK state (reverted),
-		// we just print that we got it.
-		// TODO: When SDK is ready: if err := commissionee.HandleMessage(payload); ...
-		err := commissionee.HandleMessage(payload)
-		if err != nil {
+		// HandleMessage is a stub today (TODO §19-21); call it so the wiring
+		// is visibly correct end to end.
+		if err := commissionee.HandleMessage(frame); err != nil {
 			fmt.Printf("HandleMessage error: %v\n", err)
 		} else {
-			fmt.Println("Message handled (Stub).")
+			fmt.Println("Frame handled (stub).")
 		}
 	})
 

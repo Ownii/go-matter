@@ -3,6 +3,9 @@ package transport
 import (
 	"fmt"
 	"net"
+	"os"
+
+	"go-matter/message"
 )
 
 // MessageSecurity defines the interface for cryptographic processing of the payload.
@@ -15,8 +18,8 @@ type MessageSecurity interface {
 	DecryptPayload(sessionID uint16, ciphertext []byte, header []byte) ([]byte, error)
 }
 
-// ReadHandler defines the callback for received packets.
-type ReadHandler func(payload []byte, from *net.UDPAddr)
+// ReadHandler defines the callback for received frames.
+type ReadHandler func(frame *message.Frame, from *net.UDPAddr)
 
 // TransportManager handles sending and receiving messages over UDP.
 type TransportManager struct {
@@ -41,16 +44,21 @@ func NewTransportManager(port int, security MessageSecurity) (*TransportManager,
 	}, nil
 }
 
-// Send sends a message to the specified address.
-// It handles MRP (Message Reliability Protocol) logic if reliable delivery is requested.
-func (tm *TransportManager) Send(addr *net.UDPAddr, payload []byte, reliable bool) error {
-	// TODO: Use security to encrypt payload?
-	// For now, raw send for PASE sample scaffold
-	_, err := tm.conn.WriteToUDP(payload, addr)
+// Send serialises the frame and writes it to the destination address.
+// MRP behaviour for reliable delivery is not implemented yet (TODO §17).
+func (tm *TransportManager) Send(addr *net.UDPAddr, frame *message.Frame, reliable bool) error {
+	// TODO: MRP retransmission table when reliable == true.
+	// TODO: Encrypt frame.Payload via tm.security once secure sessions land.
+	wire, err := frame.Encode()
+	if err != nil {
+		return fmt.Errorf("transport: encode frame: %w", err)
+	}
+	_, err = tm.conn.WriteToUDP(wire, addr)
 	return err
 }
 
-// Start starts the receiving loop.
+// Start runs the receive loop, decoding each datagram into a Frame and
+// dispatching it to the handler. Malformed datagrams are logged and dropped.
 func (tm *TransportManager) Start(handler ReadHandler) error {
 	buf := make([]byte, 2048)
 	for {
@@ -59,14 +67,15 @@ func (tm *TransportManager) Start(handler ReadHandler) error {
 			return err
 		}
 
-		// Copy payload
-		payload := make([]byte, n)
-		copy(payload, buf[:n])
-
-		// TODO: Decrypt using tm.security?
+		// TODO: Decrypt the post-header portion via tm.security for secured sessions.
+		frame, err := message.Decode(buf[:n])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "transport: drop malformed packet from %s: %v\n", addr, err)
+			continue
+		}
 
 		if handler != nil {
-			handler(payload, addr)
+			handler(frame, addr)
 		}
 	}
 }

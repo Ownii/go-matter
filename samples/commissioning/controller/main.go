@@ -2,21 +2,24 @@ package main
 
 import (
 	"fmt"
-	"go-matter/commissioning"
-	"go-matter/transport"
 	"net"
 	"time"
+
+	"go-matter/commissioning"
+	"go-matter/message"
+	"go-matter/transport"
 )
 
-// ControllerMessenger adapts transport system to CommissioningMessenger interface
+// ControllerMessenger adapts the transport layer to the
+// commissioning.CommissioningMessenger interface.
 type ControllerMessenger struct {
 	tm         *transport.TransportManager
 	deviceAddr *net.UDPAddr
 }
 
-func (m *ControllerMessenger) SendMessage(payload []byte) error {
-	// Send unreliable by default for this simple sample
-	return m.tm.Send(m.deviceAddr, payload, false)
+func (m *ControllerMessenger) SendMessage(frame *message.Frame) error {
+	// Send unreliable by default for this simple sample.
+	return m.tm.Send(m.deviceAddr, frame, false)
 }
 
 func main() {
@@ -37,10 +40,13 @@ func main() {
 	// Start Transport Listener
 	go func() {
 		fmt.Printf("Controller listening on %d...\n", ctrlPort)
-		if err := tm.Start(func(payload []byte, from *net.UDPAddr) {
-			fmt.Printf("Controller received %d bytes from %s\n", len(payload), from)
-
-			// TODO: Pass to Commissioner.HandleMessage(payload) when implemented
+		if err := tm.Start(func(frame *message.Frame, from *net.UDPAddr) {
+			fmt.Printf("Controller received frame opcode=%#x exchange=%d payload=%d bytes from %s\n",
+				byte(frame.PayloadHeader.Opcode),
+				frame.PayloadHeader.ExchangeID,
+				len(frame.Payload),
+				from)
+			// TODO: dispatch into Commissioner.HandleMessage(frame) when implemented.
 		}); err != nil {
 			fmt.Printf("Controller transport error: %v\n", err)
 		}
