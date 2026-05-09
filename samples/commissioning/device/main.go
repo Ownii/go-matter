@@ -14,8 +14,13 @@ func main() {
 
 	devicePort := 5540
 
-	// Create Commissionee (Passcode: 12345678)
-	commissionee := commissioning.NewCommissionee(12345678)
+	// Create Commissionee (Passcode: 12345678). Salt/iterations match the
+	// canonical Matter test fixture so paired controllers can reproduce.
+	commissionee, err := commissioning.NewCommissionee(
+		12345678, []byte("SPAKE2P Key Salt"), 1000)
+	if err != nil {
+		panic(err)
+	}
 
 	// 1. Setup Transport
 	tm, err := transport.NewTransportManager(devicePort, nil)

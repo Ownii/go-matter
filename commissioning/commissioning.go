@@ -34,7 +34,7 @@ type Commissioner struct {
 	State          CommissioningState
 	Messenger      CommissioningMessenger
 	Passcode       uint32
-	SpakeContext   *crypto.SPAKE2PContext
+	SpakeContext   *crypto.SPAKE2PProver
 	Random         []byte
 	SessionID      uint16
 	ExchangeID     uint16
@@ -126,26 +126,64 @@ func (c *Commissioner) StartCASE(nodeID uint64) error {
 }
 
 // Commissionee (Responder) handles the commissioning process from the device side.
+//
+// W0 and L are the persisted SPAKE2+ verifier (computed once at provisioning
+// time via crypto.ComputeSPAKE2PVerifierData) — the device never stores the
+// passcode itself. Salt and Iterations are echoed in PBKDFParamResponse so
+// the Commissioner can re-run PBKDF2 with matching parameters.
 type Commissionee struct {
 	State        CommissioningState
 	Passcode     uint32
-	SpakeContext *crypto.SPAKE2PContext
+	Salt         []byte
+	Iterations   int
+	W0           []byte
+	L            []byte
+	SpakeContext *crypto.SPAKE2PVerifier
 	Random       []byte
 }
 
-// NewCommissionee creates a new Commissionee.
-func NewCommissionee(passcode uint32) *Commissionee {
-	return &Commissionee{
-		State:    StateIdle,
-		Passcode: passcode,
+// NewCommissionee creates a new Commissionee. Passcode, salt, and iteration
+// count are folded through PBKDF2 once at construction; only (W0, L) and the
+// salt+iterations are kept thereafter.
+func NewCommissionee(passcode uint32, salt []byte, iterations int) (*Commissionee, error) {
+	w0, L, err := crypto.ComputeSPAKE2PVerifierData(passcode, salt, iterations)
+	if err != nil {
+		return nil, fmt.Errorf("commissionee: derive verifier: %w", err)
 	}
+	return &Commissionee{
+		State:      StateIdle,
+		Passcode:   passcode,
+		Salt:       append([]byte(nil), salt...),
+		Iterations: iterations,
+		W0:         w0,
+		L:          L,
+	}, nil
 }
 
-// HandleMessage processes incoming commissioning frames.
+// HandleMessage processes incoming commissioning frames. Body decoding for
+// each opcode is still a TODO; this is the dispatch skeleton on which the
+// PASE message handlers will hang.
 func (c *Commissionee) HandleMessage(frame *message.Frame) error {
-	// TODO: dispatch on c.State and frame.PayloadHeader.Opcode for Pake1/Pake2/Pake3.
-	// For now just record the opcode of the most recent message so the sample
-	// can show that decoding worked end to end.
-	_ = frame
+	switch frame.PayloadHeader.Opcode {
+	case message.OpcodePBKDFParamRequest:
+		// TODO: TLV-decode body; persist InitiatorRandom; reply with
+		// PBKDFParamResponse echoing Salt + Iterations.
+		c.State = StatePASE_PBKDFParamResponse
+	case message.OpcodePASEPake1:
+		// TODO: TLV-decode body to extract pA; build the PASE context bytes
+		// (PBKDFParamRequest||Response transcript per Matter §3.10);
+		// instantiate c.SpakeContext via crypto.NewSPAKE2PVerifier(c.W0,
+		// c.L, ctx); call ComputePB(pA); send Pake2 carrying pB and cB.
+		c.State = StatePASE_Pake2
+	case message.OpcodePASEPake3:
+		// TODO: TLV-decode body to extract cA; verify with
+		// c.SpakeContext.VerifyConfirmationA(cA); on success transition
+		// to StateComplete and seed the operational session keys from
+		// SharedKey().
+		c.State = StateComplete
+	default:
+		return fmt.Errorf("commissionee: unexpected opcode %#x in state %d",
+			byte(frame.PayloadHeader.Opcode), c.State)
+	}
 	return nil
 }
