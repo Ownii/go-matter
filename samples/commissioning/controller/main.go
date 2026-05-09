@@ -37,6 +37,14 @@ func main() {
 	}
 	defer tm.Close()
 
+	// 2. Initialize Commissioner up front so the receive loop can dispatch
+	// responder frames into it.
+	messenger := &ControllerMessenger{
+		tm:         tm,
+		deviceAddr: deviceAddr,
+	}
+	commissioner := commissioning.NewCommissioner(messenger)
+
 	// Start Transport Listener
 	go func() {
 		fmt.Printf("Controller listening on %d...\n", ctrlPort)
@@ -46,7 +54,13 @@ func main() {
 				frame.PayloadHeader.ExchangeID,
 				len(frame.Payload),
 				from)
-			// TODO: dispatch into Commissioner.HandleMessage(frame) when implemented.
+			if err := commissioner.HandleMessage(frame); err != nil {
+				fmt.Printf("Commissioner.HandleMessage error: %v\n", err)
+				return
+			}
+			fmt.Printf("Commissioner state -> %d (salt=%x iterations=%d responderSessionID=%d)\n",
+				commissioner.State, commissioner.Salt, commissioner.Iterations,
+				commissioner.ResponderSessionID)
 		}); err != nil {
 			fmt.Printf("Controller transport error: %v\n", err)
 		}
@@ -54,13 +68,6 @@ func main() {
 
 	// Allow transport to start
 	time.Sleep(100 * time.Millisecond)
-
-	// 2. Initialize Commissioner
-	messenger := &ControllerMessenger{
-		tm:         tm,
-		deviceAddr: deviceAddr,
-	}
-	commissioner := commissioning.NewCommissioner(messenger)
 
 	// 3. Start PASE Handshake
 	fmt.Println("Attempting to start PASE...")
