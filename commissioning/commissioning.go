@@ -16,7 +16,6 @@ type CommissioningState int
 
 const (
 	StateIdle CommissioningState = iota
-	StatePASE_PBKDFParamRequest
 	StatePASE_PBKDFParamResponse
 	StatePASE_Pake1
 	StatePASE_Pake2
@@ -30,7 +29,7 @@ type CommissioningMessenger interface {
 	SendMessage(frame *message.Frame) error
 }
 
-// PBKDFParamRequest is the first PASE message (Matter §4.13.1.1).
+// PBKDFParamRequest — Matter §4.13.1.1.
 type PBKDFParamRequest struct {
 	InitiatorRandom    []byte `tlv:"1"`
 	InitiatorSessionID uint16 `tlv:"2"`
@@ -46,8 +45,8 @@ type PBKDFParamSet struct {
 	Salt       []byte `tlv:"2"`
 }
 
-// PBKDFParamResponse is the second PASE message (Matter §4.13.1.2). The
-// responder echoes InitiatorRandom to bind the transcript.
+// PBKDFParamResponse — Matter §4.13.1.2. The responder echoes
+// InitiatorRandom to bind the transcript.
 type PBKDFParamResponse struct {
 	InitiatorRandom    []byte         `tlv:"1"`
 	ResponderRandom    []byte         `tlv:"2"`
@@ -55,30 +54,27 @@ type PBKDFParamResponse struct {
 	Params             *PBKDFParamSet `tlv:"4,omitempty"`
 }
 
-// Pake1 carries the Prover's public share pA (Matter §4.13.1.3).
+// Pake1 — Matter §4.13.1.3.
 type Pake1 struct {
 	PA []byte `tlv:"1"`
 }
 
-// Pake2 carries the Verifier's public share pB and confirmation MAC cB
-// (Matter §4.13.1.4).
+// Pake2 — Matter §4.13.1.4.
 type Pake2 struct {
 	PB []byte `tlv:"1"`
 	CB []byte `tlv:"2"`
 }
 
-// Pake3 carries the Prover's confirmation MAC cA (Matter §4.13.1.5).
+// Pake3 — Matter §4.13.1.5.
 type Pake3 struct {
 	CA []byte `tlv:"1"`
 }
 
-// paseContextPrefix is the per-spec ASCII prefix mixed into the SPAKE2+
-// transcript hash (Matter §3.10).
 const paseContextPrefix = "CHIP PAKE V1 Commissioning"
 
 // paseContext returns the raw SPAKE2+ context bytes
-// (prefix || PBKDFParamRequest || PBKDFParamResponse). spakeFinalize hashes
-// it internally, so callers pass it un-hashed.
+// (prefix || PBKDFParamRequest || PBKDFParamResponse) per Matter §3.10.
+// crypto.spakeFinalize hashes it internally, so it is passed un-hashed.
 func paseContext(req, resp []byte) []byte {
 	out := make([]byte, 0, len(paseContextPrefix)+len(req)+len(resp))
 	out = append(out, paseContextPrefix...)
@@ -87,31 +83,30 @@ func paseContext(req, resp []byte) []byte {
 	return out
 }
 
-// Commissioner drives the PASE handshake from the controller side.
+// Commissioner drives the PASE handshake from the controller (initiator) side.
 //
 // SessionID is the initiator's chosen *future* secure session ID; the PASE
-// frames themselves use unsecured session 0. RequestPayload / ResponsePayload
-// retain the raw TLV bodies so Pake1 can build the SPAKE2+ context input
-// (PBKDFParamRequest||PBKDFParamResponse, Matter §3.10).
+// frames themselves use unsecured session 0.
 type Commissioner struct {
 	State          CommissioningState
 	Messenger      CommissioningMessenger
 	Passcode       uint32
-	SpakeContext   *crypto.SPAKE2PProver
 	Random         []byte
 	SessionID      uint16
 	ExchangeID     uint16
 	MessageCounter uint32
 
-	RequestPayload []byte
+	RequestPayload  []byte
+	ResponsePayload []byte
 
 	ResponderRandom    []byte
 	ResponderSessionID uint16
 	Salt               []byte
 	Iterations         uint32
-	ResponsePayload    []byte
 
-	Ke []byte // populated after Pake2 verification
+	Ke []byte // 16-byte shared key, populated after Pake2 verification
+
+	prover *crypto.SPAKE2PProver
 }
 
 func NewCommissioner(messenger CommissioningMessenger) *Commissioner {
@@ -119,7 +114,6 @@ func NewCommissioner(messenger CommissioningMessenger) *Commissioner {
 }
 
 func (c *Commissioner) StartPASE(passcode uint32) error {
-	c.State = StatePASE_PBKDFParamRequest
 	c.Passcode = passcode
 
 	c.Random = make([]byte, 32)
@@ -132,35 +126,17 @@ func (c *Commissioner) StartPASE(passcode uint32) error {
 	if c.ExchangeID == 0 {
 		c.ExchangeID = 1
 	}
-	if err := bumpCounter(&c.MessageCounter); err != nil {
-		return err
-	}
 
-	request := PBKDFParamRequest{
+	frame, err := c.buildFrame(message.OpcodePBKDFParamRequest, 0, &PBKDFParamRequest{
 		InitiatorRandom:    c.Random,
 		InitiatorSessionID: c.SessionID,
-		HasPBKDFParameters: false,
-	}
-
-	frame, err := message.NewBuilder().
-		Unsecured().
-		MessageCounter(c.MessageCounter).
-		Protocol(message.ProtocolSecureChannel).
-		Opcode(message.OpcodePBKDFParamRequest).
-		ExchangeID(c.ExchangeID).
-		Initiator().
-		RequestAck().
-		Payload(&request).
-		Build()
+	})
 	if err != nil {
-		return fmt.Errorf("commissioner: build PBKDFParamRequest: %w", err)
+		return err
 	}
 	c.RequestPayload = frame.Payload
-
-	if c.Messenger != nil {
-		return c.Messenger.SendMessage(frame)
-	}
-	return nil
+	c.State = StatePASE_PBKDFParamResponse
+	return c.send(frame)
 }
 
 func (c *Commissioner) HandleMessage(frame *message.Frame) error {
@@ -201,86 +177,51 @@ func (c *Commissioner) sendPake1(ackMC uint32) error {
 	if err != nil {
 		return fmt.Errorf("commissioner: derive w0/w1: %w", err)
 	}
-	prover, err := crypto.NewSPAKE2PProver(w0, w1, paseContext(c.RequestPayload, c.ResponsePayload))
+	c.prover, err = crypto.NewSPAKE2PProver(w0, w1, paseContext(c.RequestPayload, c.ResponsePayload))
 	if err != nil {
 		return fmt.Errorf("commissioner: new prover: %w", err)
 	}
-	pA, err := prover.ComputePA()
+	pA, err := c.prover.ComputePA()
 	if err != nil {
 		return fmt.Errorf("commissioner: ComputePA: %w", err)
 	}
-	c.SpakeContext = prover
 
-	if err := bumpCounter(&c.MessageCounter); err != nil {
+	frame, err := c.buildFrame(message.OpcodePASEPake1, ackMC, &Pake1{PA: pA})
+	if err != nil {
 		return err
 	}
-	out, err := message.NewBuilder().
-		Unsecured().
-		MessageCounter(c.MessageCounter).
-		Protocol(message.ProtocolSecureChannel).
-		Opcode(message.OpcodePASEPake1).
-		ExchangeID(c.ExchangeID).
-		Initiator().
-		AckCounter(ackMC).
-		RequestAck().
-		Payload(&Pake1{PA: pA}).
-		Build()
-	if err != nil {
-		return fmt.Errorf("commissioner: build Pake1: %w", err)
-	}
 	c.State = StatePASE_Pake2
-	if c.Messenger != nil {
-		return c.Messenger.SendMessage(out)
-	}
-	return nil
+	return c.send(frame)
 }
 
 func (c *Commissioner) handlePake2(frame *message.Frame) error {
-	if c.SpakeContext == nil {
+	if c.prover == nil {
 		return errors.New("commissioner: Pake2 received before Pake1 sent")
 	}
 	var p2 Pake2
 	if err := decodePayload(frame.Payload, &p2); err != nil {
 		return fmt.Errorf("commissioner: decode Pake2: %w", err)
 	}
-	if err := c.SpakeContext.Finalize(p2.PB); err != nil {
+	if err := c.prover.Finalize(p2.PB); err != nil {
 		return fmt.Errorf("commissioner: SPAKE2+ finalize: %w", err)
 	}
-	if err := c.SpakeContext.VerifyConfirmationB(p2.CB); err != nil {
+	if err := c.prover.VerifyConfirmationB(p2.CB); err != nil {
 		return fmt.Errorf("commissioner: verify cB: %w", err)
 	}
-	cA, err := c.SpakeContext.ConfirmationA()
+	cA, err := c.prover.ConfirmationA()
 	if err != nil {
 		return err
 	}
-	ke, err := c.SpakeContext.SharedKey()
-	if err != nil {
+	if c.Ke, err = c.prover.SharedKey(); err != nil {
 		return err
 	}
-	c.Ke = ke
 
-	if err := bumpCounter(&c.MessageCounter); err != nil {
-		return err
-	}
-	out, err := message.NewBuilder().
-		Unsecured().
-		MessageCounter(c.MessageCounter).
-		Protocol(message.ProtocolSecureChannel).
-		Opcode(message.OpcodePASEPake3).
-		ExchangeID(c.ExchangeID).
-		Initiator().
-		AckCounter(frame.Header.MessageCounter).
-		RequestAck().
-		Payload(&Pake3{CA: cA}).
-		Build()
+	out, err := c.buildFrame(message.OpcodePASEPake3, frame.Header.MessageCounter, &Pake3{CA: cA})
 	if err != nil {
-		return fmt.Errorf("commissioner: build Pake3: %w", err)
+		return err
 	}
 	c.State = StateComplete
-	if c.Messenger != nil {
-		return c.Messenger.SendMessage(out)
-	}
-	return nil
+	return c.send(out)
 }
 
 // StartCASE is a stub. TODO: implement CASE Sigma1.
@@ -289,17 +230,48 @@ func (c *Commissioner) StartCASE(nodeID uint64) error {
 	return nil
 }
 
-// Commissionee drives the PASE handshake from the device side. (W0, L) is
-// the persisted SPAKE2+ verifier — the device never stores the passcode
-// itself. RequestPayload / ResponsePayload retain the raw TLV bodies for
-// the Matter §3.10 transcript needed at Pake1.
+// buildFrame assembles an outgoing initiator-side PASE frame: bumps the
+// message counter, sets the standard unsecured/SecureChannel/Initiator/R
+// flags, and piggybacks an Ack when ackMC != 0.
+func (c *Commissioner) buildFrame(opcode message.Opcode, ackMC uint32, payload any) (*message.Frame, error) {
+	if err := bumpCounter(&c.MessageCounter); err != nil {
+		return nil, err
+	}
+	b := message.NewBuilder().
+		Unsecured().
+		Protocol(message.ProtocolSecureChannel).
+		Opcode(opcode).
+		ExchangeID(c.ExchangeID).
+		MessageCounter(c.MessageCounter).
+		Initiator().
+		RequestAck().
+		Payload(payload)
+	if ackMC != 0 {
+		b = b.AckCounter(ackMC)
+	}
+	frame, err := b.Build()
+	if err != nil {
+		return nil, fmt.Errorf("commissioner: build opcode=%#x: %w", byte(opcode), err)
+	}
+	return frame, nil
+}
+
+func (c *Commissioner) send(frame *message.Frame) error {
+	if c.Messenger == nil {
+		return nil
+	}
+	return c.Messenger.SendMessage(frame)
+}
+
+// Commissionee drives the PASE handshake from the device (responder) side.
+// (W0, L) is the persisted SPAKE2+ verifier — the device never stores the
+// passcode itself.
 type Commissionee struct {
 	State        CommissioningState
 	Salt         []byte
 	Iterations   uint32
 	W0           []byte
 	L            []byte
-	SpakeContext *crypto.SPAKE2PVerifier
 	Random       []byte
 
 	Messenger      CommissioningMessenger
@@ -308,12 +280,13 @@ type Commissionee struct {
 
 	InitiatorRandom    []byte
 	InitiatorSessionID uint16
-	InitiatorNodeID    uint64
 	ExchangeID         uint16
 	RequestPayload     []byte
 	ResponsePayload    []byte
 
-	Ke []byte // populated after Pake3 verification
+	Ke []byte // 16-byte shared key, populated after Pake3 verification
+
+	verifier *crypto.SPAKE2PVerifier
 }
 
 func NewCommissionee(passcode uint32, salt []byte, iterations int) (*Commissionee, error) {
@@ -352,7 +325,6 @@ func (c *Commissionee) handlePBKDFParamRequest(frame *message.Frame) error {
 
 	c.InitiatorRandom = req.InitiatorRandom
 	c.InitiatorSessionID = req.InitiatorSessionID
-	c.InitiatorNodeID = req.InitiatorNodeID
 	c.ExchangeID = frame.PayloadHeader.ExchangeID
 	c.RequestPayload = frame.Payload
 
@@ -363,39 +335,23 @@ func (c *Commissionee) handlePBKDFParamRequest(frame *message.Frame) error {
 	if c.SessionID == 0 {
 		c.SessionID = 23456 // TODO: draw from SessionManager.
 	}
-	if err := bumpCounter(&c.MessageCounter); err != nil {
-		return err
-	}
 
-	response := PBKDFParamResponse{
+	resp := PBKDFParamResponse{
 		InitiatorRandom:    c.InitiatorRandom,
 		ResponderRandom:    c.Random,
 		ResponderSessionID: c.SessionID,
 	}
 	if !req.HasPBKDFParameters {
-		response.Params = &PBKDFParamSet{Iterations: c.Iterations, Salt: c.Salt}
+		resp.Params = &PBKDFParamSet{Iterations: c.Iterations, Salt: c.Salt}
 	}
 
-	out, err := message.NewBuilder().
-		Unsecured().
-		MessageCounter(c.MessageCounter).
-		Protocol(message.ProtocolSecureChannel).
-		Opcode(message.OpcodePBKDFParamResponse).
-		ExchangeID(c.ExchangeID).
-		AckCounter(frame.Header.MessageCounter).
-		Payload(&response).
-		Build()
+	out, err := c.buildFrame(message.OpcodePBKDFParamResponse, frame.Header.MessageCounter, &resp)
 	if err != nil {
-		return fmt.Errorf("commissionee: build PBKDFParamResponse: %w", err)
+		return err
 	}
-
 	c.ResponsePayload = out.Payload
 	c.State = StatePASE_Pake1
-
-	if c.Messenger != nil {
-		return c.Messenger.SendMessage(out)
-	}
-	return nil
+	return c.send(out)
 }
 
 func (c *Commissionee) handlePake1(frame *message.Frame) error {
@@ -418,43 +374,28 @@ func (c *Commissionee) handlePake1(frame *message.Frame) error {
 	if err != nil {
 		return err
 	}
-	c.SpakeContext = verifier
+	c.verifier = verifier
 
-	if err := bumpCounter(&c.MessageCounter); err != nil {
+	out, err := c.buildFrame(message.OpcodePASEPake2, frame.Header.MessageCounter, &Pake2{PB: pB, CB: cB})
+	if err != nil {
 		return err
 	}
-	out, err := message.NewBuilder().
-		Unsecured().
-		MessageCounter(c.MessageCounter).
-		Protocol(message.ProtocolSecureChannel).
-		Opcode(message.OpcodePASEPake2).
-		ExchangeID(c.ExchangeID).
-		AckCounter(frame.Header.MessageCounter).
-		RequestAck().
-		Payload(&Pake2{PB: pB, CB: cB}).
-		Build()
-	if err != nil {
-		return fmt.Errorf("commissionee: build Pake2: %w", err)
-	}
 	c.State = StatePASE_Pake3
-	if c.Messenger != nil {
-		return c.Messenger.SendMessage(out)
-	}
-	return nil
+	return c.send(out)
 }
 
 func (c *Commissionee) handlePake3(frame *message.Frame) error {
-	if c.SpakeContext == nil {
+	if c.verifier == nil {
 		return errors.New("commissionee: Pake3 received before Pake1")
 	}
 	var p3 Pake3
 	if err := decodePayload(frame.Payload, &p3); err != nil {
 		return fmt.Errorf("commissionee: decode Pake3: %w", err)
 	}
-	if err := c.SpakeContext.VerifyConfirmationA(p3.CA); err != nil {
+	if err := c.verifier.VerifyConfirmationA(p3.CA); err != nil {
 		return fmt.Errorf("commissionee: verify cA: %w", err)
 	}
-	ke, err := c.SpakeContext.SharedKey()
+	ke, err := c.verifier.SharedKey()
 	if err != nil {
 		return err
 	}
@@ -463,9 +404,41 @@ func (c *Commissionee) handlePake3(frame *message.Frame) error {
 	return nil
 }
 
+// buildFrame assembles an outgoing responder-side PASE frame: bumps the
+// message counter, sets the standard unsecured/SecureChannel/R flags, and
+// piggybacks an Ack when ackMC != 0.
+func (c *Commissionee) buildFrame(opcode message.Opcode, ackMC uint32, payload any) (*message.Frame, error) {
+	if err := bumpCounter(&c.MessageCounter); err != nil {
+		return nil, err
+	}
+	b := message.NewBuilder().
+		Unsecured().
+		Protocol(message.ProtocolSecureChannel).
+		Opcode(opcode).
+		ExchangeID(c.ExchangeID).
+		MessageCounter(c.MessageCounter).
+		RequestAck().
+		Payload(payload)
+	if ackMC != 0 {
+		b = b.AckCounter(ackMC)
+	}
+	frame, err := b.Build()
+	if err != nil {
+		return nil, fmt.Errorf("commissionee: build opcode=%#x: %w", byte(opcode), err)
+	}
+	return frame, nil
+}
+
+func (c *Commissionee) send(frame *message.Frame) error {
+	if c.Messenger == nil {
+		return nil
+	}
+	return c.Messenger.SendMessage(frame)
+}
+
 // decodePayload reads one top-level TLV element, recursively populating
 // SubElements for containers, then reflects it into out.
-func decodePayload(payload []byte, out interface{}) error {
+func decodePayload(payload []byte, out any) error {
 	r := tlv.NewReader(bytes.NewReader(payload))
 	elem, err := r.ReadElement()
 	if err != nil {
