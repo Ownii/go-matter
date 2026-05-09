@@ -55,6 +55,38 @@ type PBKDFParamResponse struct {
 	Params             *PBKDFParamSet `tlv:"4,omitempty"`
 }
 
+// Pake1 carries the Prover's public share pA (Matter §4.13.1.3).
+type Pake1 struct {
+	PA []byte `tlv:"1"`
+}
+
+// Pake2 carries the Verifier's public share pB and confirmation MAC cB
+// (Matter §4.13.1.4).
+type Pake2 struct {
+	PB []byte `tlv:"1"`
+	CB []byte `tlv:"2"`
+}
+
+// Pake3 carries the Prover's confirmation MAC cA (Matter §4.13.1.5).
+type Pake3 struct {
+	CA []byte `tlv:"1"`
+}
+
+// paseContextPrefix is the per-spec ASCII prefix mixed into the SPAKE2+
+// transcript hash (Matter §3.10).
+const paseContextPrefix = "CHIP PAKE V1 Commissioning"
+
+// paseContext returns the raw SPAKE2+ context bytes
+// (prefix || PBKDFParamRequest || PBKDFParamResponse). spakeFinalize hashes
+// it internally, so callers pass it un-hashed.
+func paseContext(req, resp []byte) []byte {
+	out := make([]byte, 0, len(paseContextPrefix)+len(req)+len(resp))
+	out = append(out, paseContextPrefix...)
+	out = append(out, req...)
+	out = append(out, resp...)
+	return out
+}
+
 // Commissioner drives the PASE handshake from the controller side.
 //
 // SessionID is the initiator's chosen *future* secure session ID; the PASE
@@ -78,6 +110,8 @@ type Commissioner struct {
 	Salt               []byte
 	Iterations         uint32
 	ResponsePayload    []byte
+
+	Ke []byte // populated after Pake2 verification
 }
 
 func NewCommissioner(messenger CommissioningMessenger) *Commissioner {
@@ -133,6 +167,8 @@ func (c *Commissioner) HandleMessage(frame *message.Frame) error {
 	switch frame.PayloadHeader.Opcode {
 	case message.OpcodePBKDFParamResponse:
 		return c.handlePBKDFParamResponse(frame)
+	case message.OpcodePASEPake2:
+		return c.handlePake2(frame)
 	default:
 		return fmt.Errorf("commissioner: unexpected opcode %#x in state %d",
 			byte(frame.PayloadHeader.Opcode), c.State)
@@ -156,7 +192,94 @@ func (c *Commissioner) handlePBKDFParamResponse(frame *message.Frame) error {
 	c.Salt = resp.Params.Salt
 	c.Iterations = resp.Params.Iterations
 	c.ResponsePayload = frame.Payload
-	c.State = StatePASE_Pake1
+
+	return c.sendPake1(frame.Header.MessageCounter)
+}
+
+func (c *Commissioner) sendPake1(ackMC uint32) error {
+	w0, w1, err := crypto.Spake2pW0W1FromPasscode(c.Passcode, c.Salt, int(c.Iterations))
+	if err != nil {
+		return fmt.Errorf("commissioner: derive w0/w1: %w", err)
+	}
+	prover, err := crypto.NewSPAKE2PProver(w0, w1, paseContext(c.RequestPayload, c.ResponsePayload))
+	if err != nil {
+		return fmt.Errorf("commissioner: new prover: %w", err)
+	}
+	pA, err := prover.ComputePA()
+	if err != nil {
+		return fmt.Errorf("commissioner: ComputePA: %w", err)
+	}
+	c.SpakeContext = prover
+
+	if err := bumpCounter(&c.MessageCounter); err != nil {
+		return err
+	}
+	out, err := message.NewBuilder().
+		Unsecured().
+		MessageCounter(c.MessageCounter).
+		Protocol(message.ProtocolSecureChannel).
+		Opcode(message.OpcodePASEPake1).
+		ExchangeID(c.ExchangeID).
+		Initiator().
+		AckCounter(ackMC).
+		RequestAck().
+		Payload(&Pake1{PA: pA}).
+		Build()
+	if err != nil {
+		return fmt.Errorf("commissioner: build Pake1: %w", err)
+	}
+	c.State = StatePASE_Pake2
+	if c.Messenger != nil {
+		return c.Messenger.SendMessage(out)
+	}
+	return nil
+}
+
+func (c *Commissioner) handlePake2(frame *message.Frame) error {
+	if c.SpakeContext == nil {
+		return errors.New("commissioner: Pake2 received before Pake1 sent")
+	}
+	var p2 Pake2
+	if err := decodePayload(frame.Payload, &p2); err != nil {
+		return fmt.Errorf("commissioner: decode Pake2: %w", err)
+	}
+	if err := c.SpakeContext.Finalize(p2.PB); err != nil {
+		return fmt.Errorf("commissioner: SPAKE2+ finalize: %w", err)
+	}
+	if err := c.SpakeContext.VerifyConfirmationB(p2.CB); err != nil {
+		return fmt.Errorf("commissioner: verify cB: %w", err)
+	}
+	cA, err := c.SpakeContext.ConfirmationA()
+	if err != nil {
+		return err
+	}
+	ke, err := c.SpakeContext.SharedKey()
+	if err != nil {
+		return err
+	}
+	c.Ke = ke
+
+	if err := bumpCounter(&c.MessageCounter); err != nil {
+		return err
+	}
+	out, err := message.NewBuilder().
+		Unsecured().
+		MessageCounter(c.MessageCounter).
+		Protocol(message.ProtocolSecureChannel).
+		Opcode(message.OpcodePASEPake3).
+		ExchangeID(c.ExchangeID).
+		Initiator().
+		AckCounter(frame.Header.MessageCounter).
+		RequestAck().
+		Payload(&Pake3{CA: cA}).
+		Build()
+	if err != nil {
+		return fmt.Errorf("commissioner: build Pake3: %w", err)
+	}
+	c.State = StateComplete
+	if c.Messenger != nil {
+		return c.Messenger.SendMessage(out)
+	}
 	return nil
 }
 
@@ -189,6 +312,8 @@ type Commissionee struct {
 	ExchangeID         uint16
 	RequestPayload     []byte
 	ResponsePayload    []byte
+
+	Ke []byte // populated after Pake3 verification
 }
 
 func NewCommissionee(passcode uint32, salt []byte, iterations int) (*Commissionee, error) {
@@ -210,16 +335,13 @@ func (c *Commissionee) HandleMessage(frame *message.Frame) error {
 	case message.OpcodePBKDFParamRequest:
 		return c.handlePBKDFParamRequest(frame)
 	case message.OpcodePASEPake1:
-		// TODO: decode pA, run crypto.NewSPAKE2PVerifier(W0,L,ctx).ComputePB, send Pake2.
-		c.State = StatePASE_Pake2
+		return c.handlePake1(frame)
 	case message.OpcodePASEPake3:
-		// TODO: verify cA via SpakeContext.VerifyConfirmationA, seed session keys.
-		c.State = StateComplete
+		return c.handlePake3(frame)
 	default:
 		return fmt.Errorf("commissionee: unexpected opcode %#x in state %d",
 			byte(frame.PayloadHeader.Opcode), c.State)
 	}
-	return nil
 }
 
 func (c *Commissionee) handlePBKDFParamRequest(frame *message.Frame) error {
@@ -273,6 +395,71 @@ func (c *Commissionee) handlePBKDFParamRequest(frame *message.Frame) error {
 	if c.Messenger != nil {
 		return c.Messenger.SendMessage(out)
 	}
+	return nil
+}
+
+func (c *Commissionee) handlePake1(frame *message.Frame) error {
+	var p1 Pake1
+	if err := decodePayload(frame.Payload, &p1); err != nil {
+		return fmt.Errorf("commissionee: decode Pake1: %w", err)
+	}
+	verifier, err := crypto.NewSPAKE2PVerifier(c.W0, c.L, paseContext(c.RequestPayload, c.ResponsePayload))
+	if err != nil {
+		return fmt.Errorf("commissionee: new verifier: %w", err)
+	}
+	pB, err := verifier.ComputePB(p1.PA)
+	if err != nil {
+		return fmt.Errorf("commissionee: ComputePB: %w", err)
+	}
+	if err := verifier.Finalize(); err != nil {
+		return fmt.Errorf("commissionee: SPAKE2+ finalize: %w", err)
+	}
+	cB, err := verifier.ConfirmationB()
+	if err != nil {
+		return err
+	}
+	c.SpakeContext = verifier
+
+	if err := bumpCounter(&c.MessageCounter); err != nil {
+		return err
+	}
+	out, err := message.NewBuilder().
+		Unsecured().
+		MessageCounter(c.MessageCounter).
+		Protocol(message.ProtocolSecureChannel).
+		Opcode(message.OpcodePASEPake2).
+		ExchangeID(c.ExchangeID).
+		AckCounter(frame.Header.MessageCounter).
+		RequestAck().
+		Payload(&Pake2{PB: pB, CB: cB}).
+		Build()
+	if err != nil {
+		return fmt.Errorf("commissionee: build Pake2: %w", err)
+	}
+	c.State = StatePASE_Pake3
+	if c.Messenger != nil {
+		return c.Messenger.SendMessage(out)
+	}
+	return nil
+}
+
+func (c *Commissionee) handlePake3(frame *message.Frame) error {
+	if c.SpakeContext == nil {
+		return errors.New("commissionee: Pake3 received before Pake1")
+	}
+	var p3 Pake3
+	if err := decodePayload(frame.Payload, &p3); err != nil {
+		return fmt.Errorf("commissionee: decode Pake3: %w", err)
+	}
+	if err := c.SpakeContext.VerifyConfirmationA(p3.CA); err != nil {
+		return fmt.Errorf("commissionee: verify cA: %w", err)
+	}
+	ke, err := c.SpakeContext.SharedKey()
+	if err != nil {
+		return err
+	}
+	c.Ke = ke
+	c.State = StateComplete
 	return nil
 }
 

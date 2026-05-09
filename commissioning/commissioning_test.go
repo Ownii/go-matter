@@ -50,47 +50,60 @@ func TestPBKDFParamResponse_TLVRoundTrip(t *testing.T) {
 	}
 }
 
-func TestPBKDFParamRequestResponse_Loopback(t *testing.T) {
-	const passcode = uint32(12345678)
+func pasePair(t *testing.T, devicePasscode, controllerPasscode uint32) (*Commissioner, *Commissionee, error) {
+	t.Helper()
 	salt := []byte("SPAKE2P Key Salt")
 	const iterations = 1000
-
-	commissionee, err := NewCommissionee(passcode, salt, iterations)
+	commissionee, err := NewCommissionee(devicePasscode, salt, iterations)
 	if err != nil {
 		t.Fatal(err)
 	}
 	commissioner := NewCommissioner(nil)
-
 	deviceMsg, controllerMsg := &loopMessenger{}, &loopMessenger{}
 	commissionee.Messenger, commissioner.Messenger = deviceMsg, controllerMsg
 	deviceMsg.deliver = commissioner.HandleMessage
 	controllerMsg.deliver = commissionee.HandleMessage
+	return commissioner, commissionee, commissioner.StartPASE(controllerPasscode)
+}
 
-	if err := commissioner.StartPASE(passcode); err != nil {
-		t.Fatal(err)
+func TestPASE_Loopback(t *testing.T) {
+	const passcode = uint32(12345678)
+	commissioner, commissionee, err := pasePair(t, passcode, passcode)
+	if err != nil {
+		t.Fatalf("PASE handshake: %v", err)
 	}
 
-	if commissioner.State != StatePASE_Pake1 || commissionee.State != StatePASE_Pake1 {
-		t.Errorf("states: commissioner=%d commissionee=%d, want Pake1=%d",
-			commissioner.State, commissionee.State, StatePASE_Pake1)
+	if commissioner.State != StateComplete || commissionee.State != StateComplete {
+		t.Errorf("states: commissioner=%d commissionee=%d, want Complete=%d",
+			commissioner.State, commissionee.State, StateComplete)
 	}
-	if !bytes.Equal(commissioner.Salt, salt) || commissioner.Iterations != uint32(iterations) {
-		t.Errorf("PBKDF params not propagated: salt=%x iter=%d", commissioner.Salt, commissioner.Iterations)
+	if len(commissioner.Ke) != 16 || !bytes.Equal(commissioner.Ke, commissionee.Ke) {
+		t.Errorf("Ke mismatch or wrong length: commissioner=%x commissionee=%x",
+			commissioner.Ke, commissionee.Ke)
 	}
 	if !bytes.Equal(commissioner.ResponderRandom, commissionee.Random) ||
-		commissioner.ResponderSessionID != commissionee.SessionID {
-		t.Errorf("responder identity mismatch")
-	}
-	if !bytes.Equal(commissioner.Random, commissionee.InitiatorRandom) ||
+		commissioner.ResponderSessionID != commissionee.SessionID ||
+		!bytes.Equal(commissioner.Random, commissionee.InitiatorRandom) ||
 		commissioner.SessionID != commissionee.InitiatorSessionID {
-		t.Errorf("initiator identity mismatch")
+		t.Errorf("identity propagation mismatch")
 	}
 	if !bytes.Equal(commissioner.RequestPayload, commissionee.RequestPayload) ||
 		!bytes.Equal(commissioner.ResponsePayload, commissionee.ResponsePayload) {
 		t.Errorf("transcript mismatch")
 	}
-	if len(commissioner.RequestPayload) == 0 || len(commissioner.ResponsePayload) == 0 {
-		t.Errorf("transcript empty")
+}
+
+func TestPASE_WrongPasscode(t *testing.T) {
+	commissioner, commissionee, err := pasePair(t, 12345678, 99999999)
+	if err == nil {
+		t.Fatal("expected handshake to fail with mismatched passcode, got nil error")
+	}
+	if commissioner.State == StateComplete || commissionee.State == StateComplete {
+		t.Errorf("states should not reach Complete on bad passcode: commissioner=%d commissionee=%d",
+			commissioner.State, commissionee.State)
+	}
+	if commissioner.Ke != nil || commissionee.Ke != nil {
+		t.Errorf("Ke must remain unset on bad passcode")
 	}
 }
 
