@@ -98,4 +98,4 @@ When implementing real crypto, replace both and update the `NonceGenerator` to f
 - **TODOs are load-bearing**: `// TODO:` comments mark known protocol gaps, not nice-to-haves. Don't delete them when adding code — update or expand them.
 - **Compile-time interface assertions** (`var _ Iface = (*Impl)(nil)`) are used at package boundaries to catch contract drift; preserve them when refactoring implementers.
 - **English-only docs/comments**: earlier commits translated docs from German to English (see `git log`). Keep new content in English.
-- **Stay on the designated branch**: development happens on feature branches like `claude/add-claude-documentation-*`. Don't push to `main` without explicit instruction.
+- **Git flow**: `develop` is the integration branch and represents the newest approved changes. `main` is for releases only and is not currently releasable. Feature branches (`claude/<topic>-*`, `feat/*`, etc.) target `develop` via PR. When a release is cut, `main` is fast-forwarded to `develop`'s tip — never merge feature branches directly into `main`, and never push to `develop` or `main` without explicit instruction.
