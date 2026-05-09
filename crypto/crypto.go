@@ -3,11 +3,8 @@ package crypto
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"io"
-
 	"crypto/sha256"
-
-	// "github.com/jtejido/spake2plus"
+	"io"
 
 	"golang.org/x/crypto/hkdf"
 )
@@ -102,23 +99,6 @@ func (ng *NonceGenerator) NextNonce() []byte {
 	return nil
 }
 
-// SPAKE2PContext holds the context for SPAKE2+ key exchange.
-// It wraps either a Client or Server instance.
-type SPAKE2PContext struct {
-	// Using interface{} to hold *spake2plus.Client or *spake2plus.Server
-	State interface{}
-}
-
-// StartSPAKE2P initializes the SPAKE2+ exchange.
-// verifier: w0 (for Prover) or L (for Verifier)?
-// context includes context string etc.
-// Simplified for scaffold: assumes Prover (Client) role for now.
-func StartSPAKE2P(verifier []byte, context []byte, w0 []byte) (*SPAKE2PContext, error) {
-	// suite := spake2plus.P256Sha256HkdfHmac(spake2plus.Scrypt(16384, 8, 1))
-	// client, err := spake2plus.NewClient(suite, []byte("client"), []byte("server"), w0, nil)
-	// if err != nil { return nil, err }
-	// return &SPAKE2PContext{State: client}, nil
-
-	// Returning empty context for scaffold to avoid complexity of library setup without config
-	return &SPAKE2PContext{}, nil
-}
+// SPAKE2+ types live in spake2plus.go (SPAKE2PProver, SPAKE2PVerifier) and
+// the password-derivation helpers in pbkdf.go. The previous SPAKE2PContext
+// scaffolding was a placeholder; commissioning now drives the real types.
