@@ -8,78 +8,45 @@ import (
 	"go-matter/tlv"
 )
 
-// loopMessenger forwards Frames synchronously to a peer's HandleMessage. It
-// substitutes for the UDP transport in tests.
 type loopMessenger struct {
 	deliver func(*message.Frame) error
 }
 
-func (l *loopMessenger) SendMessage(f *message.Frame) error {
-	if l.deliver == nil {
-		return nil
-	}
-	return l.deliver(f)
-}
+func (l *loopMessenger) SendMessage(f *message.Frame) error { return l.deliver(f) }
 
 func TestPBKDFParamResponse_TLVRoundTrip(t *testing.T) {
 	want := PBKDFParamResponse{
 		InitiatorRandom:    bytes.Repeat([]byte{0xab}, 32),
 		ResponderRandom:    bytes.Repeat([]byte{0xcd}, 32),
 		ResponderSessionID: 0xBEEF,
-		Params: &PBKDFParamSet{
-			Iterations: 1000,
-			Salt:       []byte("SPAKE2P Key Salt"),
-		},
+		Params:             &PBKDFParamSet{Iterations: 1000, Salt: []byte("SPAKE2P Key Salt")},
 	}
-
 	encoded, err := tlv.Marshal(&want)
 	if err != nil {
-		t.Fatalf("Marshal: %v", err)
+		t.Fatal(err)
 	}
-
 	var got PBKDFParamResponse
 	if err := decodePayload(encoded, &got); err != nil {
-		t.Fatalf("decodePayload: %v", err)
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got.InitiatorRandom, want.InitiatorRandom) ||
+		!bytes.Equal(got.ResponderRandom, want.ResponderRandom) ||
+		got.ResponderSessionID != want.ResponderSessionID ||
+		got.Params == nil ||
+		got.Params.Iterations != want.Params.Iterations ||
+		!bytes.Equal(got.Params.Salt, want.Params.Salt) {
+		t.Errorf("round-trip mismatch: got %+v want %+v", got, want)
 	}
 
-	if !bytes.Equal(got.InitiatorRandom, want.InitiatorRandom) {
-		t.Errorf("InitiatorRandom mismatch")
+	// Params must be omitted on the wire when nil.
+	noParams := PBKDFParamResponse{InitiatorRandom: []byte{1}, ResponderRandom: []byte{2}, ResponderSessionID: 3}
+	enc2, _ := tlv.Marshal(&noParams)
+	var dec2 PBKDFParamResponse
+	if err := decodePayload(enc2, &dec2); err != nil {
+		t.Fatal(err)
 	}
-	if !bytes.Equal(got.ResponderRandom, want.ResponderRandom) {
-		t.Errorf("ResponderRandom mismatch")
-	}
-	if got.ResponderSessionID != want.ResponderSessionID {
-		t.Errorf("ResponderSessionID: got %d, want %d", got.ResponderSessionID, want.ResponderSessionID)
-	}
-	if got.Params == nil {
-		t.Fatal("Params nil after round trip")
-	}
-	if got.Params.Iterations != want.Params.Iterations {
-		t.Errorf("Iterations: got %d, want %d", got.Params.Iterations, want.Params.Iterations)
-	}
-	if !bytes.Equal(got.Params.Salt, want.Params.Salt) {
-		t.Errorf("Salt mismatch")
-	}
-}
-
-func TestPBKDFParamResponse_OmitsParamsWhenNil(t *testing.T) {
-	resp := PBKDFParamResponse{
-		InitiatorRandom:    []byte{1, 2, 3},
-		ResponderRandom:    []byte{4, 5, 6},
-		ResponderSessionID: 7,
-		Params:             nil,
-	}
-	encoded, err := tlv.Marshal(&resp)
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
-
-	var got PBKDFParamResponse
-	if err := decodePayload(encoded, &got); err != nil {
-		t.Fatalf("decodePayload: %v", err)
-	}
-	if got.Params != nil {
-		t.Errorf("expected Params to be omitted, got %+v", got.Params)
+	if dec2.Params != nil {
+		t.Errorf("expected Params omitted, got %+v", dec2.Params)
 	}
 }
 
@@ -90,105 +57,78 @@ func TestPBKDFParamRequestResponse_Loopback(t *testing.T) {
 
 	commissionee, err := NewCommissionee(passcode, salt, iterations)
 	if err != nil {
-		t.Fatalf("NewCommissionee: %v", err)
+		t.Fatal(err)
 	}
 	commissioner := NewCommissioner(nil)
 
-	deviceMsg := &loopMessenger{}
-	controllerMsg := &loopMessenger{}
-	commissionee.Messenger = deviceMsg
-	commissioner.Messenger = controllerMsg
-
+	deviceMsg, controllerMsg := &loopMessenger{}, &loopMessenger{}
+	commissionee.Messenger, commissioner.Messenger = deviceMsg, controllerMsg
 	deviceMsg.deliver = commissioner.HandleMessage
 	controllerMsg.deliver = commissionee.HandleMessage
 
 	if err := commissioner.StartPASE(passcode); err != nil {
-		t.Fatalf("StartPASE: %v", err)
+		t.Fatal(err)
 	}
 
-	if commissioner.State != StatePASE_Pake1 {
-		t.Errorf("commissioner.State = %d, want %d", commissioner.State, StatePASE_Pake1)
+	if commissioner.State != StatePASE_Pake1 || commissionee.State != StatePASE_Pake1 {
+		t.Errorf("states: commissioner=%d commissionee=%d, want Pake1=%d",
+			commissioner.State, commissionee.State, StatePASE_Pake1)
 	}
-	if commissionee.State != StatePASE_Pake1 {
-		t.Errorf("commissionee.State = %d, want %d", commissionee.State, StatePASE_Pake1)
+	if !bytes.Equal(commissioner.Salt, salt) || commissioner.Iterations != uint32(iterations) {
+		t.Errorf("PBKDF params not propagated: salt=%x iter=%d", commissioner.Salt, commissioner.Iterations)
 	}
-
-	if !bytes.Equal(commissioner.Salt, salt) {
-		t.Errorf("commissioner.Salt = %x, want %x", commissioner.Salt, salt)
+	if !bytes.Equal(commissioner.ResponderRandom, commissionee.Random) ||
+		commissioner.ResponderSessionID != commissionee.SessionID {
+		t.Errorf("responder identity mismatch")
 	}
-	if commissioner.Iterations != uint32(iterations) {
-		t.Errorf("commissioner.Iterations = %d, want %d", commissioner.Iterations, iterations)
+	if !bytes.Equal(commissioner.Random, commissionee.InitiatorRandom) ||
+		commissioner.SessionID != commissionee.InitiatorSessionID {
+		t.Errorf("initiator identity mismatch")
 	}
-	if !bytes.Equal(commissioner.ResponderRandom, commissionee.Random) {
-		t.Errorf("commissioner.ResponderRandom != commissionee.Random")
-	}
-	if commissioner.ResponderSessionID != commissionee.SessionID {
-		t.Errorf("ResponderSessionID mismatch: commissioner=%d commissionee=%d",
-			commissioner.ResponderSessionID, commissionee.SessionID)
-	}
-
-	if !bytes.Equal(commissioner.Random, commissionee.InitiatorRandom) {
-		t.Errorf("commissioner.Random != commissionee.InitiatorRandom")
-	}
-	if commissioner.SessionID != commissionee.InitiatorSessionID {
-		t.Errorf("InitiatorSessionID mismatch: commissioner=%d commissionee=%d",
-			commissioner.SessionID, commissionee.InitiatorSessionID)
-	}
-
-	if !bytes.Equal(commissioner.RequestPayload, commissionee.RequestPayload) {
-		t.Errorf("RequestPayload transcript mismatch")
-	}
-	if !bytes.Equal(commissioner.ResponsePayload, commissionee.ResponsePayload) {
-		t.Errorf("ResponsePayload transcript mismatch")
+	if !bytes.Equal(commissioner.RequestPayload, commissionee.RequestPayload) ||
+		!bytes.Equal(commissioner.ResponsePayload, commissionee.ResponsePayload) {
+		t.Errorf("transcript mismatch")
 	}
 	if len(commissioner.RequestPayload) == 0 || len(commissioner.ResponsePayload) == 0 {
-		t.Errorf("transcript payloads empty: req=%d resp=%d",
-			len(commissioner.RequestPayload), len(commissioner.ResponsePayload))
+		t.Errorf("transcript empty")
 	}
 }
 
-func TestCommissioner_RejectsMismatchedInitiatorRandom(t *testing.T) {
-	commissioner := NewCommissioner(nil)
-	commissioner.Random = bytes.Repeat([]byte{0x11}, 32)
-
-	resp := PBKDFParamResponse{
-		InitiatorRandom:    bytes.Repeat([]byte{0x22}, 32), // wrong
-		ResponderRandom:    bytes.Repeat([]byte{0x33}, 32),
-		ResponderSessionID: 1,
-		Params:             &PBKDFParamSet{Iterations: 1000, Salt: []byte("salt")},
+func TestCommissioner_HandleMessage_Errors(t *testing.T) {
+	tests := []struct {
+		name string
+		resp PBKDFParamResponse
+	}{
+		{
+			name: "wrong InitiatorRandom",
+			resp: PBKDFParamResponse{
+				InitiatorRandom:    bytes.Repeat([]byte{0x22}, 32),
+				ResponderRandom:    bytes.Repeat([]byte{0x33}, 32),
+				ResponderSessionID: 1,
+				Params:             &PBKDFParamSet{Iterations: 1000, Salt: []byte("salt")},
+			},
+		},
+		{
+			name: "missing Params",
+			resp: PBKDFParamResponse{
+				InitiatorRandom:    bytes.Repeat([]byte{0x11}, 32),
+				ResponderRandom:    bytes.Repeat([]byte{0x33}, 32),
+				ResponderSessionID: 1,
+			},
+		},
 	}
-	encoded, err := tlv.Marshal(&resp)
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
-
-	frame := &message.Frame{
-		PayloadHeader: message.PayloadHeader{Opcode: message.OpcodePBKDFParamResponse},
-		Payload:       encoded,
-	}
-	if err := commissioner.HandleMessage(frame); err == nil {
-		t.Fatal("expected error for mismatched InitiatorRandom, got nil")
-	}
-}
-
-func TestCommissioner_RejectsMissingParams(t *testing.T) {
-	commissioner := NewCommissioner(nil)
-	commissioner.Random = bytes.Repeat([]byte{0x11}, 32)
-
-	resp := PBKDFParamResponse{
-		InitiatorRandom:    commissioner.Random,
-		ResponderRandom:    bytes.Repeat([]byte{0x33}, 32),
-		ResponderSessionID: 1,
-	}
-	encoded, err := tlv.Marshal(&resp)
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
-	frame := &message.Frame{
-		PayloadHeader: message.PayloadHeader{Opcode: message.OpcodePBKDFParamResponse},
-		Payload:       encoded,
-	}
-	if err := commissioner.HandleMessage(frame); err == nil {
-		t.Fatal("expected error for missing PBKDF params, got nil")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := NewCommissioner(nil)
+			c.Random = bytes.Repeat([]byte{0x11}, 32)
+			payload, _ := tlv.Marshal(&tc.resp)
+			frame := &message.Frame{
+				PayloadHeader: message.PayloadHeader{Opcode: message.OpcodePBKDFParamResponse},
+				Payload:       payload,
+			}
+			if err := c.HandleMessage(frame); err == nil {
+				t.Fatal("expected error, got nil")
+			}
+		})
 	}
 }

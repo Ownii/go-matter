@@ -94,6 +94,7 @@ When implementing real crypto, replace both and update the `NonceGenerator` to f
 ## Conventions
 
 - **No `cmd/` directory**: executables live under `samples/<feature>/<role>/main.go`. Follow that layout when adding new runnable demos.
+- **Comments only where they earn their place**: aim for self-explanatory code. Do not restate what a well-named identifier already says, and skip narration comments like `// Generate random data` or `// Initialize Commissioner`. Add a comment when it explains *why* something is done, captures a non-obvious invariant or spec citation (e.g. `Matter §4.5.1.1`), or warns about a placeholder that diverges from the spec.
 - **TODOs are load-bearing**: `// TODO:` comments mark known protocol gaps, not nice-to-haves. Don't delete them when adding code — update or expand them.
 - **Compile-time interface assertions** (`var _ Iface = (*Impl)(nil)`) are used at package boundaries to catch contract drift; preserve them when refactoring implementers.
 - **English-only docs/comments**: earlier commits translated docs from German to English (see `git log`). Keep new content in English.
