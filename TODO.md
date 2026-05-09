@@ -8,7 +8,7 @@ A current-state audit and a recommended order of work to get from the current sc
 |---|---|---|
 | `tlv/` | **Working** | Encoder + decoder + struct tag reflection; only package with tests. Edge cases (FullyQualified tags, List vs Array, floats) are gaps. |
 | `message/` | **Working** | Matter Message Header + Payload Header encode/decode + fluent `Builder`. Round-trip tested. Secured-frame decryption hook is a TODO. |
-| `crypto/` | **Stubbed** | AES-CCM replaced with AES-GCM placeholder; SPAKE2+ wrapper holds `interface{}`; HKDF returns fixed 16 bytes; `NonceGenerator.NextNonce` returns `nil`. |
+| `crypto/` | **Partial** | SPAKE2+ Prover/Verifier landed (vendored from `tom-code/gomat`, BSD-2-Clause; PBKDF2 + (w0, L) verifier-data helpers; round-trip + locked-transcript tests). AES-CCM still a GCM placeholder; HKDF still fixed 16 bytes; `NonceGenerator.NextNonce` still returns `nil`. |
 | `transport/` | **Partial** | UDP send/receive operates on `*message.Frame`. No MRP, no encryption hookup. |
 | `session/` | **Stubbed** | `EncryptPayload`/`DecryptPayload` are pass-through. No key derivation, no counter management, no replay window. |
 | `commissioning/` | **Skeleton** | `PBKDFParamRequest` is sent inside a real Matter frame (header + payload header + TLV). `PBKDFParamResponse` and Pake1/2/3 missing. `Commissionee.HandleMessage` receives `*message.Frame` but doesn't dispatch yet. CASE is one TODO. |
@@ -43,7 +43,7 @@ The cross-cutting blocker that everything depended on — the Matter Message Fra
 
 8. **Replace the AES-GCM placeholder with AES-CCM** (13-byte nonce, 16-byte tag). `cipher.NewCCM` is unavailable in stdlib — use `golang.org/x/crypto`'s CCM or vendor a small implementation. Add round-trip tests with Matter test vectors.
 9. **Implement `NonceGenerator.NextNonce`** per Matter §5.3.1: `Security Flags (1) | Message Counter (4) | Source Node ID (8)` — note the spec says 13 bytes, not the layout currently in the comment. Cover with a known-vector test.
-10. **Wire `jtejido/spake2plus`** into `crypto.SPAKE2PContext`. Replace `interface{}` with concrete client/server fields. Provide `ComputePA`, `ComputePB`, `ComputeZ`, `ConfirmationHash` helpers — the names should match the PASE explainer in `docs/PASE_Explainer.md`.
+10. ~~**Wire `jtejido/spake2plus`** into `crypto.SPAKE2PContext`.~~ **DONE** — vendored from `tom-code/gomat` (BSD-2-Clause) instead, since `jtejido/spake2plus` hides the intermediate values Matter §3.10's TT requires. `crypto.SPAKE2PProver` / `crypto.SPAKE2PVerifier` expose `ComputePA`, `ComputePB`, `Finalize`, `ConfirmationA/B`, `VerifyConfirmation*`, `SharedKey`. Follow-ups: cross-check w0/w1 byte-width against `connectedhomeip/src/crypto/tests/`, and validate end-to-end against a real Matter device.
 11. **HKDF: return `io.Reader` or accept length parameter**. The fixed 16-byte output in `DeriveKeys` is wrong for Matter, which derives multiple keys (I2RKey, R2IKey, AttestationChallenge) from one secret.
 
 ## Phase 4 — Session layer (depends on 2, 3)
