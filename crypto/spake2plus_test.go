@@ -162,14 +162,12 @@ func TestRejectInvalidPoint(t *testing.T) {
 		t.Errorf("verifier accepted off-curve pA")
 	}
 
-	pA, err := prover.ComputePA()
-	if err != nil {
+	if _, err := prover.ComputePA(); err != nil {
 		t.Fatalf("ComputePA: %v", err)
 	}
-	if err := prover.Finalize(append([]byte{}, bogus...)); err == nil {
+	if err := prover.Finalize(bogus); err == nil {
 		t.Errorf("prover accepted off-curve pB")
 	}
-	_ = pA
 
 	// Constructor must reject an off-curve L.
 	w0, _, err := Spake2pW0W1FromPasscode(20202021, []byte("SPAKE2P Key Salt"), 1000)
@@ -290,8 +288,9 @@ func TestTranscriptDeterminism(t *testing.T) {
 	}
 }
 
-// TestComputePATwiceIsIdempotentScalar — guard against Finalize accidentally
-// regenerating x.
+// TestProverFinalizeRequiresPA — calling Finalize before ComputePA is a
+// usage error, not a panic. Guards the lifecycle invariant that Finalize
+// reads the secret scalar x set by ComputePA.
 func TestProverFinalizeRequiresPA(t *testing.T) {
 	w0, w1, err := Spake2pW0W1FromPasscode(20202021, []byte("SPAKE2P Key Salt"), 1000)
 	if err != nil {
@@ -301,19 +300,41 @@ func TestProverFinalizeRequiresPA(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSPAKE2PProver: %v", err)
 	}
-	pBValid := goodPointBytes(t)
+	curve := elliptic.P256()
+	scalar := make([]byte, 32)
+	binary.BigEndian.PutUint32(scalar[28:], 1)
+	gx, gy := curve.ScalarBaseMult(scalar)
+	pBValid := elliptic.Marshal(curve, gx, gy)
 	if err := prover.Finalize(pBValid); err == nil {
 		t.Errorf("Finalize without ComputePA must fail")
 	}
 }
 
-func goodPointBytes(t *testing.T) []byte {
-	t.Helper()
-	curve := elliptic.P256()
-	scalar := make([]byte, 32)
-	binary.BigEndian.PutUint32(scalar[28:], 1)
-	x, y := curve.ScalarBaseMult(scalar)
-	return elliptic.Marshal(curve, x, y)
+// TestFinalizeRejectsDoubleCall — a second Finalize must error rather than
+// silently overwriting the negotiated keys.
+func TestFinalizeRejectsDoubleCall(t *testing.T) {
+	prover, verifier := freshProverVerifier(t,
+		20202021, []byte("SPAKE2P Key Salt"), 1000, []byte(testContextString))
+	pA, err := prover.ComputePA()
+	if err != nil {
+		t.Fatalf("ComputePA: %v", err)
+	}
+	pB, err := verifier.ComputePB(pA)
+	if err != nil {
+		t.Fatalf("ComputePB: %v", err)
+	}
+	if err := prover.Finalize(pB); err != nil {
+		t.Fatalf("Prover.Finalize: %v", err)
+	}
+	if err := prover.Finalize(pB); err == nil {
+		t.Errorf("Prover.Finalize must reject a second call")
+	}
+	if err := verifier.Finalize(); err != nil {
+		t.Fatalf("Verifier.Finalize: %v", err)
+	}
+	if err := verifier.Finalize(); err == nil {
+		t.Errorf("Verifier.Finalize must reject a second call")
+	}
 }
 
 // Smoke test: counterReader returns predictable bytes and the test helper

@@ -53,6 +53,10 @@ var ErrConfirmationMismatch = errors.New("crypto/spake2plus: confirmation MAC mi
 // are called before Finalize.
 var errNotFinalized = errors.New("crypto/spake2plus: Finalize has not been called")
 
+// errAlreadyFinalized is returned when Finalize is called a second time.
+// Re-running Finalize would silently overwrite the negotiated keys.
+var errAlreadyFinalized = errors.New("crypto/spake2plus: Finalize has already been called")
+
 // spakeRandReader is the source of secret scalars. Production callers leave
 // it at rand.Reader; tests swap it for a deterministic reader to lock the
 // transcript.
@@ -136,19 +140,46 @@ func spakeSerializeBytes(buf *bytes.Buffer, p []byte) {
 
 // spakeBuildTT assembles the SPAKE2+ transcript per Matter §3.10.3 / RFC 9383
 // §3.3 (idProver and idVerifier are empty strings for Matter PASE).
-func spakeBuildTT(contextHash, x, y, z, v, w0 []byte) []byte {
+func spakeBuildTT(contextHash, pA, pB, z, v, w0 []byte) []byte {
 	var buf bytes.Buffer
 	spakeSerializeBytes(&buf, contextHash)
 	spakeSerializeBytes(&buf, nil) // idProver = ""
 	spakeSerializeBytes(&buf, nil) // idVerifier = ""
 	spakeSerializeBytes(&buf, spakeMBytes)
 	spakeSerializeBytes(&buf, spakeNBytes)
-	spakeSerializeBytes(&buf, x)
-	spakeSerializeBytes(&buf, y)
+	spakeSerializeBytes(&buf, pA)
+	spakeSerializeBytes(&buf, pB)
 	spakeSerializeBytes(&buf, z)
 	spakeSerializeBytes(&buf, v)
 	spakeSerializeBytes(&buf, w0)
 	return buf.Bytes()
+}
+
+// spakeFinalize derives Ke and the two confirmation MACs from the protocol
+// transcript. Shared by Prover and Verifier so the two paths cannot drift.
+func spakeFinalize(context, pA, pB, z, v, w0 []byte) (ke, cA, cB []byte, err error) {
+	contextHash := spakeSha256Sum(context)
+	ttHash := spakeSha256Sum(spakeBuildTT(contextHash, pA, pB, z, v, w0))
+	ka := ttHash[:16]
+	ke = bytes.Clone(ttHash[16:32])
+
+	confirmKeys, err := spakeHkdfSha256(ka, nil, []byte("ConfirmationKeys"), 32)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	cA = spakeHmacSha256(confirmKeys[:16], pB)
+	cB = spakeHmacSha256(confirmKeys[16:], pA)
+	return ke, cA, cB, nil
+}
+
+// spakeNegateY returns (x, -y mod P) — the additive inverse of a P-256 point.
+// Used to express subtraction (P − Q) as Add(P, negate(Q)) since
+// crypto/elliptic only exposes Add.
+func spakeNegateY(x, y *big.Int) (*big.Int, *big.Int) {
+	p := spake2pCurve.Params().P
+	negY := new(big.Int).Neg(y)
+	negY.Mod(negY, p)
+	return x, negY
 }
 
 // unmarshalP256Point decodes a 65-byte uncompressed point and rejects anything
@@ -185,9 +216,9 @@ func NewSPAKE2PProver(w0, w1, context []byte) (*SPAKE2PProver, error) {
 		return nil, errors.New("crypto/spake2plus: w0 and w1 must be non-empty")
 	}
 	return &SPAKE2PProver{
-		w0:      append([]byte(nil), w0...),
-		w1:      append([]byte(nil), w1...),
-		context: append([]byte(nil), context...),
+		w0:      bytes.Clone(w0),
+		w1:      bytes.Clone(w1),
+		context: bytes.Clone(context),
 	}, nil
 }
 
@@ -204,12 +235,15 @@ func (p *SPAKE2PProver) ComputePA() ([]byte, error) {
 	mx, my := spake2pCurve.ScalarMult(spakeMx, spakeMy, p.w0)
 	pAx, pAy := spake2pCurve.Add(tx, ty, mx, my)
 	p.pA = elliptic.Marshal(spake2pCurve, pAx, pAy)
-	return append([]byte(nil), p.pA...), nil
+	return bytes.Clone(p.pA), nil
 }
 
 // Finalize ingests the peer's pB, computes Z and V, derives Ke, Ka, KcA, KcB,
 // and produces both confirmation MACs.
 func (p *SPAKE2PProver) Finalize(pB []byte) error {
+	if p.finalized {
+		return errAlreadyFinalized
+	}
 	if p.x == nil {
 		return errors.New("crypto/spake2plus: ComputePA must be called before Finalize")
 	}
@@ -217,34 +251,23 @@ func (p *SPAKE2PProver) Finalize(pB []byte) error {
 	if err != nil {
 		return err
 	}
-	p.pB = append([]byte(nil), pB...)
+	p.pB = bytes.Clone(pB)
 
 	// Z = x · (pB − w0·N)
 	// V = w1 · (pB − w0·N)
 	wnx, wny := spake2pCurve.ScalarMult(spakeNx, spakeNy, p.w0)
-	wny = new(big.Int).Mod(new(big.Int).Neg(wny), spake2pCurve.Params().P)
-	dx, dy := spake2pCurve.Add(pBx, pBy, wnx, wny)
+	negNx, negNy := spakeNegateY(wnx, wny)
+	dx, dy := spake2pCurve.Add(pBx, pBy, negNx, negNy)
 	zx, zy := spake2pCurve.ScalarMult(dx, dy, p.x.Bytes())
 	vx, vy := spake2pCurve.ScalarMult(dx, dy, p.w1)
 	z := elliptic.Marshal(spake2pCurve, zx, zy)
 	v := elliptic.Marshal(spake2pCurve, vx, vy)
 
-	return p.deriveKeys(z, v)
-}
-
-func (p *SPAKE2PProver) deriveKeys(z, v []byte) error {
-	contextHash := spakeSha256Sum(p.context)
-	tt := spakeBuildTT(contextHash, p.pA, p.pB, z, v, p.w0)
-	ttHash := spakeSha256Sum(tt)
-	ka := ttHash[:16]
-	p.ke = append([]byte(nil), ttHash[16:32]...)
-
-	confirmKeys, err := spakeHkdfSha256(ka, nil, []byte("ConfirmationKeys"), 32)
+	ke, cA, cB, err := spakeFinalize(p.context, p.pA, p.pB, z, v, p.w0)
 	if err != nil {
 		return err
 	}
-	p.cA = spakeHmacSha256(confirmKeys[:16], p.pB)
-	p.cB = spakeHmacSha256(confirmKeys[16:], p.pA)
+	p.ke, p.cA, p.cB = ke, cA, cB
 	p.finalized = true
 	return nil
 }
@@ -254,7 +277,7 @@ func (p *SPAKE2PProver) ConfirmationA() ([]byte, error) {
 	if !p.finalized {
 		return nil, errNotFinalized
 	}
-	return append([]byte(nil), p.cA...), nil
+	return bytes.Clone(p.cA), nil
 }
 
 // VerifyConfirmationB constant-time-compares the Verifier's cB against the
@@ -275,7 +298,7 @@ func (p *SPAKE2PProver) SharedKey() ([]byte, error) {
 	if !p.finalized {
 		return nil, errNotFinalized
 	}
-	return append([]byte(nil), p.ke...), nil
+	return bytes.Clone(p.ke), nil
 }
 
 // SPAKE2PVerifier is the B-side (Responder / Commissionee) of a Matter PASE
@@ -309,11 +332,11 @@ func NewSPAKE2PVerifier(w0, l, context []byte) (*SPAKE2PVerifier, error) {
 		return nil, fmt.Errorf("crypto/spake2plus: L: %w", err)
 	}
 	return &SPAKE2PVerifier{
-		w0:      append([]byte(nil), w0...),
-		lBytes:  append([]byte(nil), l...),
+		w0:      bytes.Clone(w0),
+		lBytes:  bytes.Clone(l),
 		lx:      lx,
 		ly:      ly,
-		context: append([]byte(nil), context...),
+		context: bytes.Clone(context),
 	}, nil
 }
 
@@ -325,7 +348,7 @@ func (v *SPAKE2PVerifier) ComputePB(pA []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	v.pA = append([]byte(nil), pA...)
+	v.pA = bytes.Clone(pA)
 
 	y, err := spakeRandomScalar()
 	if err != nil {
@@ -341,34 +364,30 @@ func (v *SPAKE2PVerifier) ComputePB(pA []byte) ([]byte, error) {
 
 	// Z = y · (pA − w0·M); V = y · L
 	wmx, wmy := spake2pCurve.ScalarMult(spakeMx, spakeMy, v.w0)
-	wmy = new(big.Int).Mod(new(big.Int).Neg(wmy), spake2pCurve.Params().P)
-	dx, dy := spake2pCurve.Add(pAx, pAy, wmx, wmy)
+	negMx, negMy := spakeNegateY(wmx, wmy)
+	dx, dy := spake2pCurve.Add(pAx, pAy, negMx, negMy)
 	zx, zy := spake2pCurve.ScalarMult(dx, dy, y.Bytes())
 	vx, vy := spake2pCurve.ScalarMult(v.lx, v.ly, y.Bytes())
 	v.zV = elliptic.Marshal(spake2pCurve, zx, zy)
 	v.vV = elliptic.Marshal(spake2pCurve, vx, vy)
 
-	return append([]byte(nil), v.pB...), nil
+	return bytes.Clone(v.pB), nil
 }
 
 // Finalize derives Ke, Ka, KcA, KcB and the two confirmation MACs from the
 // transcript pre-computed by ComputePB.
 func (v *SPAKE2PVerifier) Finalize() error {
+	if v.finalized {
+		return errAlreadyFinalized
+	}
 	if v.zV == nil || v.vV == nil {
 		return errors.New("crypto/spake2plus: ComputePB must be called before Finalize")
 	}
-	contextHash := spakeSha256Sum(v.context)
-	tt := spakeBuildTT(contextHash, v.pA, v.pB, v.zV, v.vV, v.w0)
-	ttHash := spakeSha256Sum(tt)
-	ka := ttHash[:16]
-	v.ke = append([]byte(nil), ttHash[16:32]...)
-
-	confirmKeys, err := spakeHkdfSha256(ka, nil, []byte("ConfirmationKeys"), 32)
+	ke, cA, cB, err := spakeFinalize(v.context, v.pA, v.pB, v.zV, v.vV, v.w0)
 	if err != nil {
 		return err
 	}
-	v.cA = spakeHmacSha256(confirmKeys[:16], v.pB)
-	v.cB = spakeHmacSha256(confirmKeys[16:], v.pA)
+	v.ke, v.cA, v.cB = ke, cA, cB
 	v.finalized = true
 	return nil
 }
@@ -378,7 +397,7 @@ func (v *SPAKE2PVerifier) ConfirmationB() ([]byte, error) {
 	if !v.finalized {
 		return nil, errNotFinalized
 	}
-	return append([]byte(nil), v.cB...), nil
+	return bytes.Clone(v.cB), nil
 }
 
 // VerifyConfirmationA constant-time-compares the Prover's cA against the
@@ -399,5 +418,5 @@ func (v *SPAKE2PVerifier) SharedKey() ([]byte, error) {
 	if !v.finalized {
 		return nil, errNotFinalized
 	}
-	return append([]byte(nil), v.ke...), nil
+	return bytes.Clone(v.ke), nil
 }
