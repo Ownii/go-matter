@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net"
 
@@ -9,45 +10,52 @@ import (
 	"go-matter/transport"
 )
 
+// deviceMessenger sends Commissionee replies back to the most recent peer.
+// The transport read loop is single-threaded, so no synchronisation is needed.
+type deviceMessenger struct {
+	tm   *transport.TransportManager
+	peer *net.UDPAddr
+}
+
+func (m *deviceMessenger) SendMessage(frame *message.Frame) error {
+	if m.peer == nil {
+		return errors.New("device messenger: no known peer")
+	}
+	return m.tm.Send(m.peer, frame, false)
+}
+
 func main() {
-	fmt.Println("Starting Matter Device Sample...")
+	const devicePort = 5540
 
-	devicePort := 5540
-
-	// Create Commissionee (Passcode: 12345678). Salt/iterations match the
-	// canonical Matter test fixture so paired controllers can reproduce.
 	commissionee, err := commissioning.NewCommissionee(
 		12345678, []byte("SPAKE2P Key Salt"), 1000)
 	if err != nil {
 		panic(err)
 	}
 
-	// 1. Setup Transport
 	tm, err := transport.NewTransportManager(devicePort, nil)
 	if err != nil {
 		panic(err)
 	}
 	defer tm.Close()
 
+	messenger := &deviceMessenger{tm: tm}
+	commissionee.Messenger = messenger
+
 	fmt.Printf("Device listening on %d...\n", devicePort)
-
-	// Start Transport and handle messages
 	err = tm.Start(func(frame *message.Frame, from *net.UDPAddr) {
-		fmt.Printf("Device received frame opcode=%#x exchange=%d payload=%d bytes from %s\n",
-			byte(frame.PayloadHeader.Opcode),
-			frame.PayloadHeader.ExchangeID,
-			len(frame.Payload),
-			from)
+		fmt.Printf("Device <- opcode=%#x exchange=%d payload=%d bytes from %s\n",
+			byte(frame.PayloadHeader.Opcode), frame.PayloadHeader.ExchangeID,
+			len(frame.Payload), from)
 
-		// HandleMessage is a stub today (TODO §19-21); call it so the wiring
-		// is visibly correct end to end.
+		messenger.peer = from
 		if err := commissionee.HandleMessage(frame); err != nil {
 			fmt.Printf("HandleMessage error: %v\n", err)
-		} else {
-			fmt.Println("Frame handled (stub).")
+			return
 		}
+		fmt.Printf("Commissionee state=%d sessionID=%d responderRandom=%x\n",
+			commissionee.State, commissionee.SessionID, commissionee.Random)
 	})
-
 	if err != nil {
 		fmt.Printf("Transport error: %v\n", err)
 	}
