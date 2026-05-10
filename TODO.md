@@ -1,6 +1,6 @@
 # Project TODO — go-matter
 
-A current-state audit and a recommended order of work to get from the current scaffolding to a working Matter SDK. Last refreshed: 2026-05-08.
+A current-state audit and a recommended order of work to get from the current scaffolding to a working Matter SDK. Last refreshed: 2026-05-09.
 
 ## Snapshot
 
@@ -11,15 +11,15 @@ A current-state audit and a recommended order of work to get from the current sc
 | `crypto/` | **Partial** | SPAKE2+ Prover/Verifier landed (vendored from `tom-code/gomat`, BSD-2-Clause; PBKDF2 + (w0, L) verifier-data helpers; round-trip + locked-transcript tests). AES-CCM still a GCM placeholder; HKDF still fixed 16 bytes; `NonceGenerator.NextNonce` still returns `nil`. |
 | `transport/` | **Partial** | UDP send/receive operates on `*message.Frame`. No MRP, no encryption hookup. |
 | `session/` | **Stubbed** | `EncryptPayload`/`DecryptPayload` are pass-through. No key derivation, no counter management, no replay window. |
-| `commissioning/` | **Skeleton** | `PBKDFParamRequest` is sent inside a real Matter frame (header + payload header + TLV). `PBKDFParamResponse` and Pake1/2/3 missing. `Commissionee.HandleMessage` receives `*message.Frame` but doesn't dispatch yet. CASE is one TODO. |
+| `commissioning/` | **PASE complete** | Full 5-message PASE handshake (`PBKDFParamRequest` → `Pake3`) runs end-to-end in `commissioner.go` / `commissionee.go`; both sides reach `StateComplete` with matching 16-byte `Ke`. Wrong-passcode rejection at `VerifyConfirmationB` is tested. **Pending**: HKDF `Ke` → `(I2RKey, R2IKey, AttestationChallenge)` and handoff to `SessionManager`; `Commissioner.StartCASE` is still a stub. |
 | `discovery/` | **Stubbed** | mDNS advertiser + browser are `return nil` shells. |
 | `interaction/` | **Stubbed** | Read/Write request handlers and senders are TODOs. No Subscribe/Invoke. |
 | `datamodel/` + `model/` | **Skeleton** | Types exist; `Attribute` carries metadata only — no value storage. `DataStore.ReadAttribute` returns `nil, nil`. |
-| `samples/` | **Demo only** | Controller sends one framed `PBKDFParamRequest`; device prints opcode + exchange ID + payload. No end-to-end completion path. |
-| Tests | `tlv/` + `message/` | Other packages have zero coverage. |
+| `samples/` | **Demo only** | Controller + device drive the full PASE handshake over UDP loopback; both sides log state transitions and the negotiated session ID. Nothing runs after Pake3 (no secured frames, no Interaction Model). |
+| Tests | `tlv/` + `message/` + `crypto/` + `commissioning/` | `interaction/`, `model/`, `transport/`, `session/`, `discovery/` still have zero coverage. |
 | Build/CI | None | No `make`, no GitHub Actions, no lint config. `go build ./...` and `go test ./...` pass. |
 
-The cross-cutting blocker that everything depended on — the Matter Message Frame format (Message Header + Payload Header / Exchange Header) — now lives in `message/`. `transport.Send` operates on `*message.Frame`, and `commissioning` builds `PBKDFParamRequest` through the fluent `message.Builder`. The next blocker is real crypto (AES-CCM + SPAKE2+) so secured sessions can land.
+PASE produces a working `Ke` on both sides but nothing post-handshake is encrypted yet: AES-CCM is still a GCM placeholder, `NonceGenerator.NextNonce` returns `nil`, `crypto.HKDF` is fixed at 16 bytes, and `session.SessionManager.{Encrypt,Decrypt}Payload` are pass-throughs. The next blocker is finishing Phase 3 (crypto) so Phase 4 (session keys) can land — at which point every commissioning step from `ArmFailSafe` onward becomes reachable through the (still TODO) Interaction Model.
 
 ---
 
@@ -63,23 +63,20 @@ The cross-cutting blocker that everything depended on — the Matter Message Fra
     - The `unackedMessages map[uint32]interface{}` field on `TransportManager` is the placeholder for this — give it a real type.
 18. **Exchange Manager** — `transport` (or a new `exchange/` package) needs to track active exchanges and route inbound messages by Exchange ID. Today, the `ReadHandler` is called blindly.
 
-## Phase 6 — Complete PASE (depends on 2, 3, 4, 5)
+## Phase 6 — Complete PASE — **DONE**
 
-19. **`PBKDFParamResponse` struct + handler** (responder generates Salt + Iterations + Session ID; initiator stores them).
-20. **Pake1 / Pake2 / Pake3 structs and state transitions** in `Commissionee.HandleMessage`. Each step must:
-    - Update `c.State`.
-    - Feed the on-the-wire bytes into the running **PASE transcript hash** (see explainer §"How is the Session Key calculated?").
-    - Validate confirmation hashes (`cA`, `cB`).
-21. **Derive session keys from `Ke`** (HKDF over transcript) and hand them to `SessionManager.CreateSession` so subsequent traffic is encrypted.
-22. **Wire commissionee receive path**: `samples/commissioning/device/main.go:35` already calls `HandleMessage` — once 19-21 are done, it should drive a real response. Update the controller sample to consume the response.
-23. **Tests**: a unit test for each PASE message round-trip (encode → decode → re-encode), and an in-process integration test that runs commissioner + commissionee against each other without UDP.
+19. ~~**`PBKDFParamResponse` struct + handler**~~ — done. `commissioning/messages.go` defines `PBKDFParamResponse` + nested `PBKDFParamSet`; `Commissionee.handlePBKDFParamRequest` decodes the request and replies with salt/iterations/responder-random/session-ID.
+20. ~~**Pake1 / Pake2 / Pake3 structs and state transitions**~~ — done. Wire structs in `commissioning/messages.go`; `commissioning.paseContext` builds the SPAKE2+ context input (`"CHIP PAKE V1 Commissioning" || PBKDFParamRequest || PBKDFParamResponse`, Matter §3.10) and `crypto.spakeFinalize` hashes it. Commissioner runs `Spake2pW0W1FromPasscode → NewSPAKE2PProver → ComputePA → Finalize(pB) → VerifyConfirmationB → ConfirmationA`. Commissionee runs `NewSPAKE2PVerifier(W0,L,ctx) → ComputePB(pA) → Finalize → ConfirmationB → VerifyConfirmationA`. Both reach `StateComplete` with the same 16-byte `Ke`.
+21. **Derive session keys from `Ke` and hand to `SessionManager`** — _pending_. `Ke` is produced and stored on `Commissioner.Ke` / `Commissionee.Ke` but no HKDF expansion to `(I2RKey, R2IKey, AttestationChallenge)` and no `SessionManager.CreateSession` handoff yet. Blocked by Phase 3 §11 (variable-length HKDF) and Phase 4 §12-13 (typed key struct + AES-CCM encrypt/decrypt).
+22. ~~**Wire commissionee receive path**~~ — done. The device sample (`samples/commissioning/device/main.go`) dispatches into `Commissionee.HandleMessage`, the controller sample consumes responses via `Commissioner.HandleMessage`, and a `deviceMessenger` sends replies back to the originating UDP peer.
+23. ~~**Tests**~~ — done. `commissioning/commissioning_test.go` covers `PBKDFParamResponse` TLV round-trip, `omitempty` on `Params`, full in-memory PASE loopback (`TestPASE_Loopback`), wrong-passcode rejection at `VerifyConfirmationB` (`TestPASE_WrongPasscode`), and `Commissioner.HandleMessage` error paths.
 
 ## Phase 7 — CASE + Fabrics (depends on 6, plus new crypto)
 
 24. **NOC / ICAC / RCAC certificate handling** in `crypto/` (X.509 parsing, Matter-specific extensions, signature verification with P-256).
 25. **Fabric table** in `model.Fabric` — store RootCert, NOC, ICAC, fabric ID, node ID, IPK. Persist (see Phase 9).
 26. **CASE handshake messages** (Sigma1, Sigma2, Sigma3) in `commissioning/`. Reuse the framing/transcript pattern from PASE.
-27. **`Commissioner.StartCASE`** body (currently one TODO at `commissioning/commissioning.go:97`).
+27. **`Commissioner.StartCASE`** body (currently a 3-line stub in `commissioning/commissioner.go`).
 
 ## Phase 8 — Discovery (independent, can run in parallel with 4-6)
 
@@ -122,19 +119,21 @@ The cross-cutting blocker that everything depended on — the Matter Message Fra
 
 ## Recommended order
 
-The fastest path to "working PASE handshake against a real Matter device" is:
+PASE is in. The fastest path to a Matter session that actually carries traffic is now:
 
 ```
-Phase 2 (framing)  →  Phase 3 (crypto)  →  Phase 4 (session)
-                   ↘                    ↘
-                     Phase 5 (MRP)        Phase 6 (PASE complete)
-                                          ↓
+Phase 3 (AES-CCM, NextNonce, HKDF)  →  Phase 4 (typed session keys, encrypt/decrypt, counter window)
+                                                          ↓
+                                          §21 (HKDF Ke → I2RKey/R2IKey, install in SessionManager)
+                                                          ↓
+                                          Phase 5 (MRP, Exchange Manager)
+                                                          ↓
 Phase 1 (TLV polish, opportunistically)   Phase 7 (CASE)   ←   Phase 8 (mDNS, parallel)
-                                          ↓
-                                          Phase 9 (Interaction Model)
-                                          ↓
-                                          Phase 10 (Data model)
-                                          ↓
+                                                          ↓
+                                          Phase 9 (Interaction Model)   ←   needed before any post-PASE
+                                                          ↓               commissioning step (ArmFailSafe,
+                                          Phase 10 (Data model + clusters)  CSRRequest, AddNOC, etc.)
+                                                          ↓
                                           Phase 11 (CI, tooling, samples)
 ```
 
@@ -142,14 +141,14 @@ Strict dependency order, single-developer flat list:
 
 1. ~~**§6** — Add `message/` package with Matter Message Header + Payload Header.~~ **Done.**
 2. ~~**§7** — Wire framing into `transport`, change `ReadHandler` signature.~~ **Done.**
-3. **§8** — AES-CCM in `crypto`.
-4. **§9** — Real `NextNonce`.
-5. **§10** — Real SPAKE2+ context.
-6. **§11** — HKDF returning variable-length output.
-7. **§12-15** — Session keys, encrypt/decrypt, counter window, unsecured session.
-8. **§17-18** — MRP and Exchange Manager.
-9. **§19-22** — PASE messages + transcript hash + state machine + sample wiring.
-10. **§23** — PASE in-process integration test.
+3. ~~**§10** — Real SPAKE2+ context.~~ **Done.**
+4. ~~**§19-20, §22-23** — PASE messages + state machine + sample wiring + integration test.~~ **Done.**
+5. **§8** — AES-CCM in `crypto`.
+6. **§9** — Real `NextNonce`.
+7. **§11** — HKDF returning variable-length output.
+8. **§12-15** — Session keys, encrypt/decrypt, counter window, unsecured session.
+9. **§21** — HKDF `Ke` → `(I2RKey, R2IKey, AttestationChallenge)` and `SessionManager.CreateSession` handoff. (This is the lone PASE follow-up; depends on §11 + §12.)
+10. **§17-18** — MRP and Exchange Manager.
 11. **§1-5** — Phase 1 TLV polish (insert here once you've felt the pain points from real protocol work).
 12. **§28-30** — mDNS, in parallel with the next steps.
 13. **§24-27** — CASE + Fabrics.
@@ -157,4 +156,4 @@ Strict dependency order, single-developer flat list:
 15. **§37-40** — Data model + persistence + ACL.
 16. **§41-45** — CI, lint, integration sample, codegen.
 
-Items §1-5 (TLV polish) are deliberately deferred: the current encoder works for everything in scope through Phase 6, and you'll have a much better sense of which gaps actually matter once you've encoded a few real Matter structs.
+Items §1-5 (TLV polish) are deliberately deferred: the current encoder works for everything through PASE, and you'll have a much better sense of which gaps actually matter once you've encoded CASE Sigma1/2/3 and a few Interaction Model structs.
