@@ -29,13 +29,15 @@ type KeyPair interface {
 
 // CryptoProvider defines the interface for cryptographic operations.
 type CryptoProvider interface {
-	// Encrypt performs AES-CCM encryption with a 13-byte nonce and
-	// 16-byte auth tag (Matter §5.3). The tag is appended to the ciphertext.
+	// Encrypt seals plaintext with AES-128-CCM (Matter §5.3); the
+	// authentication tag is appended to the returned ciphertext. Returns
+	// ErrInvalidNonceSize when len(nonce) != MatterNonceSize.
 	Encrypt(key []byte, nonce []byte, plaintext []byte, aad []byte) ([]byte, error)
 
-	// Decrypt performs AES-CCM decryption. ciphertext must include the
-	// trailing 16-byte tag. Returns ErrInvalidNonceSize or an
-	// authentication error if verification fails.
+	// Decrypt opens an AES-128-CCM ciphertext that carries a trailing
+	// authentication tag (Matter §5.3). Returns ErrInvalidNonceSize when
+	// len(nonce) != MatterNonceSize, or an auth-failure error from the
+	// underlying AEAD.
 	Decrypt(key []byte, nonce []byte, ciphertext []byte, aad []byte) ([]byte, error)
 
 	// DeriveKeys derives session keys using HKDF.

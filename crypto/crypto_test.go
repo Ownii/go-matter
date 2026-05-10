@@ -7,27 +7,27 @@ import (
 	"testing"
 )
 
-func newTestKey(t *testing.T) []byte {
-	t.Helper()
-	return []byte{
+var (
+	testKey = []byte{
 		0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
 		0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
 	}
-}
-
-func newTestNonce(t *testing.T) []byte {
-	t.Helper()
-	return []byte{
+	testNonce = []byte{
 		0x00, 0x00, 0x00, 0x05,
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 		0xa1,
 	}
+)
+
+// flipBit returns a copy of b with bit 0 of byte i toggled.
+func flipBit(b []byte, i int) []byte {
+	out := append([]byte(nil), b...)
+	out[i] ^= 0x01
+	return out
 }
 
 func TestEncryptDecrypt_RoundTrip(t *testing.T) {
 	p := &DefaultCryptoProvider{}
-	key := newTestKey(t)
-	nonce := newTestNonce(t)
 	aad := []byte("matter payload header")
 
 	for _, pt := range [][]byte{
@@ -38,7 +38,7 @@ func TestEncryptDecrypt_RoundTrip(t *testing.T) {
 		bytes.Repeat([]byte{0xcd}, 32),
 		bytes.Repeat([]byte{0xef}, 1023),
 	} {
-		ct, err := p.Encrypt(key, nonce, pt, aad)
+		ct, err := p.Encrypt(testKey, testNonce, pt, aad)
 		if err != nil {
 			t.Fatalf("Encrypt(len=%d): %v", len(pt), err)
 		}
@@ -46,7 +46,7 @@ func TestEncryptDecrypt_RoundTrip(t *testing.T) {
 			t.Fatalf("Encrypt(len=%d): ciphertext len = %d, want %d",
 				len(pt), len(ct), len(pt)+MatterTagSize)
 		}
-		got, err := p.Decrypt(key, nonce, ct, aad)
+		got, err := p.Decrypt(testKey, testNonce, ct, aad)
 		if err != nil {
 			t.Fatalf("Decrypt(len=%d): %v", len(pt), err)
 		}
@@ -56,95 +56,43 @@ func TestEncryptDecrypt_RoundTrip(t *testing.T) {
 	}
 }
 
-func TestDecrypt_TamperedCiphertext(t *testing.T) {
+func TestDecrypt_RejectsTampering(t *testing.T) {
 	p := &DefaultCryptoProvider{}
-	key := newTestKey(t)
-	nonce := newTestNonce(t)
-	aad := []byte("aad")
-
-	ct, err := p.Encrypt(key, nonce, []byte("hello matter"), aad)
+	aad := []byte("matter aad")
+	ct, err := p.Encrypt(testKey, testNonce, []byte("hello matter"), aad)
 	if err != nil {
 		t.Fatalf("Encrypt: %v", err)
 	}
-	ct[0] ^= 0x01
-	if _, err := p.Decrypt(key, nonce, ct, aad); err == nil {
-		t.Fatal("Decrypt accepted tampered ciphertext byte")
+
+	cases := []struct {
+		name                string
+		key, nonce, ct, aad []byte
+	}{
+		{"flipped ciphertext byte", testKey, testNonce, flipBit(ct, 0), aad},
+		{"flipped tag byte", testKey, testNonce, flipBit(ct, len(ct)-1), aad},
+		{"changed aad", testKey, testNonce, ct, []byte("changed aad!")},
+		{"flipped key bit", flipBit(testKey, 0), testNonce, ct, aad},
+		{"flipped nonce bit", testKey, flipBit(testNonce, 0), ct, aad},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := p.Decrypt(tc.key, tc.nonce, tc.ct, tc.aad); err == nil {
+				t.Fatal("Decrypt accepted invalid input")
+			}
+		})
 	}
 }
 
-func TestDecrypt_TamperedTag(t *testing.T) {
+func TestEncryptDecrypt_NonceSize(t *testing.T) {
 	p := &DefaultCryptoProvider{}
-	key := newTestKey(t)
-	nonce := newTestNonce(t)
-	aad := []byte("aad")
-
-	ct, err := p.Encrypt(key, nonce, []byte("hello matter"), aad)
-	if err != nil {
-		t.Fatalf("Encrypt: %v", err)
-	}
-	ct[len(ct)-1] ^= 0x80
-	if _, err := p.Decrypt(key, nonce, ct, aad); err == nil {
-		t.Fatal("Decrypt accepted tampered tag byte")
-	}
-}
-
-func TestDecrypt_TamperedAAD(t *testing.T) {
-	p := &DefaultCryptoProvider{}
-	key := newTestKey(t)
-	nonce := newTestNonce(t)
-
-	ct, err := p.Encrypt(key, nonce, []byte("hello matter"), []byte("original aad"))
-	if err != nil {
-		t.Fatalf("Encrypt: %v", err)
-	}
-	if _, err := p.Decrypt(key, nonce, ct, []byte("changed aad!")); err == nil {
-		t.Fatal("Decrypt accepted mismatched AAD")
-	}
-}
-
-func TestDecrypt_WrongKey(t *testing.T) {
-	p := &DefaultCryptoProvider{}
-	nonce := newTestNonce(t)
-	aad := []byte("aad")
-
-	ct, err := p.Encrypt(newTestKey(t), nonce, []byte("hello matter"), aad)
-	if err != nil {
-		t.Fatalf("Encrypt: %v", err)
-	}
-	wrong := append([]byte(nil), newTestKey(t)...)
-	wrong[0] ^= 0x01
-	if _, err := p.Decrypt(wrong, nonce, ct, aad); err == nil {
-		t.Fatal("Decrypt accepted wrong key")
-	}
-}
-
-func TestDecrypt_WrongNonce(t *testing.T) {
-	p := &DefaultCryptoProvider{}
-	key := newTestKey(t)
-	aad := []byte("aad")
-
-	ct, err := p.Encrypt(key, newTestNonce(t), []byte("hello matter"), aad)
-	if err != nil {
-		t.Fatalf("Encrypt: %v", err)
-	}
-	wrong := append([]byte(nil), newTestNonce(t)...)
-	wrong[0] ^= 0x01
-	if _, err := p.Decrypt(key, wrong, ct, aad); err == nil {
-		t.Fatal("Decrypt accepted wrong nonce")
-	}
-}
-
-func TestEncrypt_NonceSize(t *testing.T) {
-	p := &DefaultCryptoProvider{}
-	key := newTestKey(t)
 
 	for _, badLen := range []int{0, 7, 12, 14, 16} {
 		nonce := make([]byte, badLen)
-		_, err := p.Encrypt(key, nonce, []byte("x"), nil)
+		_, err := p.Encrypt(testKey, nonce, []byte("x"), nil)
 		if !errors.Is(err, ErrInvalidNonceSize) {
 			t.Fatalf("Encrypt(nonce=%d): err=%v, want ErrInvalidNonceSize", badLen, err)
 		}
-		_, err = p.Decrypt(key, nonce, bytes.Repeat([]byte{0}, MatterTagSize+1), nil)
+		_, err = p.Decrypt(testKey, nonce, bytes.Repeat([]byte{0}, MatterTagSize+1), nil)
 		if !errors.Is(err, ErrInvalidNonceSize) {
 			t.Fatalf("Decrypt(nonce=%d): err=%v, want ErrInvalidNonceSize", badLen, err)
 		}
@@ -153,10 +101,7 @@ func TestEncrypt_NonceSize(t *testing.T) {
 
 func TestEncrypt_BadKeySize(t *testing.T) {
 	p := &DefaultCryptoProvider{}
-	nonce := newTestNonce(t)
-
-	_, err := p.Encrypt(make([]byte, 15), nonce, []byte("x"), nil)
-	if err == nil {
+	if _, err := p.Encrypt(make([]byte, 15), testNonce, []byte("x"), nil); err == nil {
 		t.Fatal("Encrypt accepted 15-byte key")
 	}
 }
@@ -166,7 +111,7 @@ func TestEncrypt_BadKeySize(t *testing.T) {
 // behaviour changes in the upstream CCM dependency.
 func TestEncrypt_LockedVector(t *testing.T) {
 	p := &DefaultCryptoProvider{}
-	got, err := p.Encrypt(newTestKey(t), newTestNonce(t),
+	got, err := p.Encrypt(testKey, testNonce,
 		[]byte("the quick brown fox"), []byte("matter"))
 	if err != nil {
 		t.Fatalf("Encrypt: %v", err)
