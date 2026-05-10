@@ -131,10 +131,10 @@ Everything else — every command, every read, every write, every subscription r
 | PASE messages 1–5 | Implemented (`commissioning/commissioner.go`, `commissioning/commissionee.go`) — both sides reach `StateComplete` with matching `Ke`. |
 | AES-128-CCM primitive | Implemented (`crypto/crypto.go` via `github.com/pion/dtls/v3/pkg/crypto/ccm`). 13-byte nonce, 16-byte tag, locked-vector test. |
 | `Ke` → session keys (HKDF expansion) | TODO §11 + §21. |
-| `NonceGenerator.NextNonce` per Matter §5.3.1 | TODO §9. |
+| `NonceGenerator.NextNonce` per Matter §5.3.1 | Implemented (`crypto/crypto.go`, `BuildNonce` + `NonceGenerator`). |
 | `SessionManager.{Encrypt,Decrypt}Payload` actually encrypting | TODO §12–15. |
 | ArmFailSafe → CommissioningComplete | TODO §31–36 (Interaction Model) + §38 (cluster catalogue, especially General Commissioning, Operational Credentials, Network Commissioning). |
 | CASE Sigma1/2/3 | TODO §24–27. |
 | Operational traffic over CASE | TODO §31+ once §24–27 land. |
 
-The AES-CCM work just landed is the gate that makes "secure session traffic" possible at all. The next steps (`NextNonce`, variable-length HKDF, session-layer encrypt/decrypt) are what turn that gate into encrypted bytes on the wire.
+AES-CCM and the §5.3.1 nonce assembly are now in place. The remaining gates before secure-session traffic can flow on the wire are variable-length HKDF (so `Ke` can be expanded into the per-direction keys) and the session-layer encrypt/decrypt wiring that ties these primitives to actual outbound and inbound frames.

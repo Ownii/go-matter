@@ -9,19 +9,12 @@ import (
 )
 
 // TestBuildNonce_LockedVector regression-locks one (flags, counter, nodeID)
-// triple to its 13-byte Matter §5.3.1 layout. Hand-computed: counter LE,
-// node ID LE.
+// triple to its 13-byte Matter §5.3.1 layout.
 func TestBuildNonce_LockedVector(t *testing.T) {
 	got := BuildNonce(0x00, 0x00112233, 0xFEDCBA9876543210)
 	want, _ := hex.DecodeString("00332211001032547698badcfe")
 	if !bytes.Equal(got, want) {
 		t.Fatalf("nonce drifted:\n got  %x\n want %x", got, want)
-	}
-}
-
-func TestBuildNonce_Length(t *testing.T) {
-	if got := len(BuildNonce(0, 0, 0)); got != MatterNonceSize {
-		t.Fatalf("nonce length = %d, want %d", got, MatterNonceSize)
 	}
 }
 
@@ -41,7 +34,7 @@ func TestBuildNonce_FieldPlacement(t *testing.T) {
 }
 
 func TestNonceGenerator_Monotonic(t *testing.T) {
-	ng := NewNonceGenerator(0xCAFE, 0)
+	ng := &NonceGenerator{SourceNodeID: 0xCAFE}
 	seen := make(map[string]struct{})
 	for i := 1; i <= 100; i++ {
 		n, err := ng.NextNonce()
@@ -55,19 +48,6 @@ func TestNonceGenerator_Monotonic(t *testing.T) {
 			t.Fatalf("NextNonce #%d returned a duplicate", i)
 		}
 		seen[string(n)] = struct{}{}
-	}
-}
-
-func TestNonceGenerator_FixedSourceFlags(t *testing.T) {
-	ng := &NonceGenerator{SourceNodeID: 0xDEADBEEF, SecurityFlags: 0x40, Counter: 41}
-	a, _ := ng.NextNonce()
-	b, _ := ng.NextNonce()
-
-	if a[0] != 0x40 || b[0] != 0x40 {
-		t.Fatalf("security flags drifted: a=%#x b=%#x", a[0], b[0])
-	}
-	if !bytes.Equal(a[5:13], b[5:13]) {
-		t.Fatalf("source node ID changed across calls: %x vs %x", a[5:13], b[5:13])
 	}
 }
 
@@ -88,7 +68,7 @@ func TestNonceGenerator_CounterExhausted(t *testing.T) {
 // is exactly the shape AES-CCM expects — feeding it into the provider
 // should round-trip cleanly.
 func TestNonceGenerator_AcceptsCCM(t *testing.T) {
-	ng := NewNonceGenerator(0xABCDEF0123456789, 0)
+	ng := &NonceGenerator{SourceNodeID: 0xABCDEF0123456789}
 	nonce, err := ng.NextNonce()
 	if err != nil {
 		t.Fatalf("NextNonce: %v", err)

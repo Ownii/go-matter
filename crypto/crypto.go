@@ -92,10 +92,8 @@ func (p *DefaultCryptoProvider) DeriveKeys(secret []byte, salt []byte, info []by
 	return key, nil
 }
 
-// ErrCounterExhausted is returned when the outbound message counter has
-// reached its 32-bit maximum. The session keys must be retired before any
-// further encryption — reusing counter 0 under the same key would also
-// reuse the nonce, breaking AES-CCM (Matter §4.5.1.1).
+// ErrCounterExhausted is returned when the 32-bit outbound message
+// counter would wrap; session keys must be retired before further use.
 var ErrCounterExhausted = errors.New("crypto: outbound message counter exhausted")
 
 // BuildNonce assembles the 13-byte AES-CCM nonce for a unicast secured
@@ -113,22 +111,18 @@ func BuildNonce(securityFlags byte, messageCounter uint32, sourceNodeID uint64) 
 // NonceGenerator produces successive outbound nonces for a single secure
 // session. Receivers should not use this type — they rebuild nonces from
 // the inbound message header via BuildNonce directly.
+//
+// Not safe for concurrent use: callers must serialize NextNonce per
+// generator. Concurrent calls could otherwise emit duplicate nonces under
+// the same key, which is fatal for AES-CCM (Matter §4.5.1.1).
 type NonceGenerator struct {
 	SourceNodeID  uint64
 	SecurityFlags byte
 	Counter       uint32
 }
 
-// NewNonceGenerator returns a generator seeded with initialCounter. The
-// next call to NextNonce will use initialCounter+1, matching Matter's
-// rule that the counter is bumped before each outbound message.
-func NewNonceGenerator(sourceNodeID uint64, initialCounter uint32) *NonceGenerator {
-	return &NonceGenerator{SourceNodeID: sourceNodeID, Counter: initialCounter}
-}
-
 // NextNonce increments the message counter and returns the nonce for the
-// new value. Returns ErrCounterExhausted before the counter would wrap;
-// the session keys must be retired and replaced.
+// new value. Returns ErrCounterExhausted before the counter would wrap.
 func (ng *NonceGenerator) NextNonce() ([]byte, error) {
 	if ng.Counter == math.MaxUint32 {
 		return nil, ErrCounterExhausted
