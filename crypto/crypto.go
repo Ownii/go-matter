@@ -4,10 +4,22 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/sha256"
+	"errors"
+	"fmt"
 	"io"
 
+	"github.com/pion/dtls/v3/pkg/crypto/ccm"
 	"golang.org/x/crypto/hkdf"
 )
+
+// MatterNonceSize is the fixed 13-byte AEAD nonce mandated by Matter §5.3.
+const MatterNonceSize = 13
+
+// MatterTagSize is the 16-byte authentication tag mandated by Matter §5.3.
+const MatterTagSize = 16
+
+// ErrInvalidNonceSize is returned when an AES-CCM nonce is not 13 bytes.
+var ErrInvalidNonceSize = errors.New("crypto: nonce must be 13 bytes per Matter §5.3")
 
 // KeyPair represents a public/private key pair.
 type KeyPair interface {
@@ -17,10 +29,15 @@ type KeyPair interface {
 
 // CryptoProvider defines the interface for cryptographic operations.
 type CryptoProvider interface {
-	// Encrypt performs AES-CCM encryption.
+	// Encrypt seals plaintext with AES-128-CCM (Matter §5.3); the
+	// authentication tag is appended to the returned ciphertext. Returns
+	// ErrInvalidNonceSize when len(nonce) != MatterNonceSize.
 	Encrypt(key []byte, nonce []byte, plaintext []byte, aad []byte) ([]byte, error)
 
-	// Decrypt performs AES-CCM decryption.
+	// Decrypt opens an AES-128-CCM ciphertext that carries a trailing
+	// authentication tag (Matter §5.3). Returns ErrInvalidNonceSize when
+	// len(nonce) != MatterNonceSize, or an auth-failure error from the
+	// underlying AEAD.
 	Decrypt(key []byte, nonce []byte, ciphertext []byte, aad []byte) ([]byte, error)
 
 	// DeriveKeys derives session keys using HKDF.
@@ -30,34 +47,31 @@ type CryptoProvider interface {
 // DefaultCryptoProvider implements CryptoProvider.
 type DefaultCryptoProvider struct{}
 
-func (p *DefaultCryptoProvider) Encrypt(key []byte, nonce []byte, plaintext []byte, aad []byte) ([]byte, error) {
+func newMatterCCM(key, nonce []byte) (cipher.AEAD, error) {
+	if len(nonce) != MatterNonceSize {
+		return nil, ErrInvalidNonceSize
+	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("crypto: aes key: %w", err)
 	}
+	return ccm.NewCCM(block, MatterTagSize, MatterNonceSize)
+}
 
-	// FALLBACK: cipher.NewCCM seems unavailable in this env, using GCM for scaffold compilation.
-	// TODO: Switch to NewCCM (13 byte nonce) for production Matter compatibility.
-	aesgcm, err := cipher.NewGCM(block)
+func (p *DefaultCryptoProvider) Encrypt(key []byte, nonce []byte, plaintext []byte, aad []byte) ([]byte, error) {
+	aead, err := newMatterCCM(key, nonce)
 	if err != nil {
 		return nil, err
 	}
-
-	return aesgcm.Seal(nil, nonce, plaintext, aad), nil
+	return aead.Seal(nil, nonce, plaintext, aad), nil
 }
 
 func (p *DefaultCryptoProvider) Decrypt(key []byte, nonce []byte, ciphertext []byte, aad []byte) ([]byte, error) {
-	block, err := aes.NewCipher(key)
+	aead, err := newMatterCCM(key, nonce)
 	if err != nil {
 		return nil, err
 	}
-
-	aesgcm, err := cipher.NewGCM(block) // TODO: Switch to NewCCM
-	if err != nil {
-		return nil, err
-	}
-
-	return aesgcm.Open(nil, nonce, ciphertext, aad)
+	return aead.Open(nil, nonce, ciphertext, aad)
 }
 
 func (p *DefaultCryptoProvider) DeriveKeys(secret []byte, salt []byte, info []byte) ([]byte, error) {
