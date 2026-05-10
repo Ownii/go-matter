@@ -23,6 +23,54 @@ flowchart LR
 
 Once those keys are installed in the `SessionManager` and the unsecured PASE channel is retired, **every subsequent message in that session is AES-CCM encrypted** under the appropriate per-direction key. This is exactly what the Matter §5.3 AES-128-CCM primitive is for — 13-byte nonce structured per §5.3.1, 16-byte authentication tag, message header bound in as AAD.
 
+## Anatomy of a secured frame
+
+Before walking through what's encrypted, it's worth seeing how a single frame is laid out — because the design is what makes the rest of this document possible.
+
+```
+┌────────────────────────────────┐ ◄── cleartext, but authenticated (AAD)
+│  Message Header                │     • Source Node ID
+│                                │     • Destination Node ID (sometimes)
+│                                │     • Message Counter
+│                                │     • Session ID
+│                                │     • Security Flags
+├════════════════════════════════┤
+│  AES-CCM ciphertext:           │ ◄── encrypted
+│    ┌──────────────────────┐    │
+│    │  Payload Header      │    │     • Opcode (Read/Write/Invoke/…)
+│    │                      │    │     • Protocol ID (Secure Channel, IM, …)
+│    │                      │    │     • Exchange ID
+│    └──────────────────────┘    │
+│    ┌──────────────────────┐    │
+│    │  Application Payload │    │     • The actual command/attribute data
+│    │                      │    │
+│    └──────────────────────┘    │
+├────────────────────────────────┤
+│  16-byte Auth Tag              │ ◄── covers everything above
+└────────────────────────────────┘
+```
+
+Two headers, on purpose:
+
+* **Outer Message Header — always cleartext.** This is what the network stack needs *before* it can decrypt: which session does this frame belong to, what's the counter, who sent it. The receiver reads the outer header, looks up the session keys, **rebuilds the 13-byte nonce** from `(SecurityFlags, MessageCounter, SourceNodeID)`, and only then can it open the ciphertext. The nonce is never carried on the wire — both sides compute it deterministically from the cleartext header.
+* **Inner Payload Header + body — encrypted.** This is where the interesting stuff lives: which opcode, which cluster, what command, what the values are.
+
+The outer header is **authenticated** even though it isn't encrypted: it's fed into AES-CCM as **AAD** (Additional Authenticated Data), so any bit-flip in flight breaks the auth tag. You can't tamper with the routing without the receiver noticing.
+
+**What this leaks to a passive eavesdropper:**
+
+* That two devices on the network are communicating.
+* Roughly how many messages they've exchanged (counters tick).
+* Approximate timing.
+
+**What it does NOT leak:**
+
+* What command was sent (on/off, lock/unlock, dim, …).
+* Which cluster or attribute.
+* The actual data values.
+
+So for confidentiality of *what* the device is doing, only the inner ciphertext matters; the outer header is metadata. This pattern (cleartext routing header + encrypted payload, with the header bound in as AAD) is standard — TLS records, SSH packets, and IPsec ESP all use the same shape.
+
 ## The rest of commissioning rides the PASE secure session
 
 This is the part that surprises people new to the protocol: **almost all of commissioning happens *after* PASE finishes**, and all of it is encrypted. The Controller invokes a series of cluster commands inside the now-secure session:
