@@ -4,9 +4,11 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 
 	"github.com/pion/dtls/v3/pkg/crypto/ccm"
 	"golang.org/x/crypto/hkdf"
@@ -90,27 +92,43 @@ func (p *DefaultCryptoProvider) DeriveKeys(secret []byte, salt []byte, info []by
 	return key, nil
 }
 
-// NonceGenerator handles the generation of cryptographic nonces.
+// ErrCounterExhausted is returned when the 32-bit outbound message
+// counter would wrap; session keys must be retired before further use.
+var ErrCounterExhausted = errors.New("crypto: outbound message counter exhausted")
+
+// BuildNonce assembles the 13-byte AES-CCM nonce for a unicast secured
+// frame per Matter §5.3.1: SecurityFlags(1) ‖ MessageCounter(4 LE) ‖
+// SourceNodeID(8 LE). The receiver reconstructs the same bytes from the
+// cleartext message header before decrypting.
+func BuildNonce(securityFlags byte, messageCounter uint32, sourceNodeID uint64) []byte {
+	nonce := make([]byte, MatterNonceSize)
+	nonce[0] = securityFlags
+	binary.LittleEndian.PutUint32(nonce[1:5], messageCounter)
+	binary.LittleEndian.PutUint64(nonce[5:13], sourceNodeID)
+	return nonce
+}
+
+// NonceGenerator produces successive outbound nonces for a single secure
+// session. Receivers should not use this type — they rebuild nonces from
+// the inbound message header via BuildNonce directly.
+//
+// Not safe for concurrent use: callers must serialize NextNonce per
+// generator. Concurrent calls could otherwise emit duplicate nonces under
+// the same key, which is fatal for AES-CCM (Matter §4.5.1.1).
 type NonceGenerator struct {
-	NodeID  uint64
-	Counter uint32
+	SourceNodeID  uint64
+	SecurityFlags byte
+	Counter       uint32
 }
 
-// NewNonceGenerator creates a new NonceGenerator.
-func NewNonceGenerator(nodeID uint64, initialCounter uint32) *NonceGenerator {
-	return &NonceGenerator{
-		NodeID:  nodeID,
-		Counter: initialCounter,
+// NextNonce increments the message counter and returns the nonce for the
+// new value. Returns ErrCounterExhausted before the counter would wrap.
+func (ng *NonceGenerator) NextNonce() ([]byte, error) {
+	if ng.Counter == math.MaxUint32 {
+		return nil, ErrCounterExhausted
 	}
-}
-
-// NextNonce generates the next nonce based on NodeID and Counter.
-func (ng *NonceGenerator) NextNonce() []byte {
-	// TODO: Implement nonce generation logic according to Matter spec
-	// 5.3.1. Nonce Structure:
-	// Security Flags (1 byte) | Session ID (2 bytes) | Message Counter (4 bytes) | Source Node ID (8 bytes)
 	ng.Counter++
-	return nil
+	return BuildNonce(ng.SecurityFlags, ng.Counter, ng.SourceNodeID), nil
 }
 
 // SPAKE2+ types live in spake2plus.go (SPAKE2PProver, SPAKE2PVerifier) and
