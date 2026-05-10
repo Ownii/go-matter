@@ -1,6 +1,6 @@
 # Project TODO — go-matter
 
-A current-state audit and a recommended order of work to get from the current scaffolding to a working Matter SDK. Last refreshed: 2026-05-09.
+A current-state audit and a recommended order of work to get from the current scaffolding to a working Matter SDK. Last refreshed: 2026-05-10.
 
 ## Snapshot
 
@@ -8,7 +8,7 @@ A current-state audit and a recommended order of work to get from the current sc
 |---|---|---|
 | `tlv/` | **Working** | Encoder + decoder + struct tag reflection; only package with tests. Edge cases (FullyQualified tags, List vs Array, floats) are gaps. |
 | `message/` | **Working** | Matter Message Header + Payload Header encode/decode + fluent `Builder`. Round-trip tested. Secured-frame decryption hook is a TODO. |
-| `crypto/` | **Partial** | SPAKE2+ Prover/Verifier landed (vendored from `tom-code/gomat`, BSD-2-Clause; PBKDF2 + (w0, L) verifier-data helpers; round-trip + locked-transcript tests). AES-CCM still a GCM placeholder; HKDF still fixed 16 bytes; `NonceGenerator.NextNonce` still returns `nil`. |
+| `crypto/` | **Partial** | SPAKE2+ Prover/Verifier landed (vendored from `tom-code/gomat`, BSD-2-Clause; PBKDF2 + (w0, L) verifier-data helpers; round-trip + locked-transcript tests). AES-CCM (13-byte nonce, 16-byte tag) now wired through `github.com/pion/dtls/v3/pkg/crypto/ccm`; round-trip + tamper + locked-vector tests cover it. HKDF still fixed 16 bytes; `NonceGenerator.NextNonce` still returns `nil`. |
 | `transport/` | **Partial** | UDP send/receive operates on `*message.Frame`. No MRP, no encryption hookup. |
 | `session/` | **Stubbed** | `EncryptPayload`/`DecryptPayload` are pass-through. No key derivation, no counter management, no replay window. |
 | `commissioning/` | **PASE complete** | Full 5-message PASE handshake (`PBKDFParamRequest` → `Pake3`) runs end-to-end in `commissioner.go` / `commissionee.go`; both sides reach `StateComplete` with matching 16-byte `Ke`. Wrong-passcode rejection at `VerifyConfirmationB` is tested. **Pending**: HKDF `Ke` → `(I2RKey, R2IKey, AttestationChallenge)` and handoff to `SessionManager`; `Commissioner.StartCASE` is still a stub. |
@@ -19,7 +19,7 @@ A current-state audit and a recommended order of work to get from the current sc
 | Tests | `tlv/` + `message/` + `crypto/` + `commissioning/` | `interaction/`, `model/`, `transport/`, `session/`, `discovery/` still have zero coverage. |
 | Build/CI | None | No `make`, no GitHub Actions, no lint config. `go build ./...` and `go test ./...` pass. |
 
-PASE produces a working `Ke` on both sides but nothing post-handshake is encrypted yet: AES-CCM is still a GCM placeholder, `NonceGenerator.NextNonce` returns `nil`, `crypto.HKDF` is fixed at 16 bytes, and `session.SessionManager.{Encrypt,Decrypt}Payload` are pass-throughs. The next blocker is finishing Phase 3 (crypto) so Phase 4 (session keys) can land — at which point every commissioning step from `ArmFailSafe` onward becomes reachable through the (still TODO) Interaction Model.
+PASE produces a working `Ke` on both sides but nothing post-handshake is encrypted yet: `NonceGenerator.NextNonce` returns `nil`, `crypto.HKDF` is fixed at 16 bytes, and `session.SessionManager.{Encrypt,Decrypt}Payload` are pass-throughs. AES-CCM is now real, so the next blockers are §9 (`NextNonce`) and §11 (variable-length HKDF) before Phase 4 can wire session keys end-to-end.
 
 ---
 
@@ -41,7 +41,7 @@ PASE produces a working `Ke` on both sides but nothing post-handshake is encrypt
 
 ## Phase 3 — Crypto primitives (unblocks 5, 6)
 
-8. **Replace the AES-GCM placeholder with AES-CCM** (13-byte nonce, 16-byte tag). `cipher.NewCCM` is unavailable in stdlib — use `golang.org/x/crypto`'s CCM or vendor a small implementation. Add round-trip tests with Matter test vectors.
+8. ~~**Replace the AES-GCM placeholder with AES-CCM**~~ — done. `crypto.DefaultCryptoProvider.{Encrypt,Decrypt}` now use `github.com/pion/dtls/v3/pkg/crypto/ccm` with a fixed 13-byte nonce (`MatterNonceSize`) and 16-byte tag (`MatterTagSize`); a sentinel `ErrInvalidNonceSize` rejects anything else. Coverage: round-trip across multiple plaintext lengths, tamper detection on ciphertext / tag / AAD, wrong-key + wrong-nonce rejection, invalid-nonce-size rejection, and a locked-output regression vector.
 9. **Implement `NonceGenerator.NextNonce`** per Matter §5.3.1: `Security Flags (1) | Message Counter (4) | Source Node ID (8)` — note the spec says 13 bytes, not the layout currently in the comment. Cover with a known-vector test.
 10. ~~**Wire `jtejido/spake2plus`** into `crypto.SPAKE2PContext`.~~ **DONE** — vendored from `tom-code/gomat` (BSD-2-Clause) instead, since `jtejido/spake2plus` hides the intermediate values Matter §3.10's TT requires. `crypto.SPAKE2PProver` / `crypto.SPAKE2PVerifier` expose `ComputePA`, `ComputePB`, `Finalize`, `ConfirmationA/B`, `VerifyConfirmation*`, `SharedKey`. Follow-ups: cross-check w0/w1 byte-width against `connectedhomeip/src/crypto/tests/`, and validate end-to-end against a real Matter device.
 11. **HKDF: return `io.Reader` or accept length parameter**. The fixed 16-byte output in `DeriveKeys` is wrong for Matter, which derives multiple keys (I2RKey, R2IKey, AttestationChallenge) from one secret.
@@ -143,7 +143,7 @@ Strict dependency order, single-developer flat list:
 2. ~~**§7** — Wire framing into `transport`, change `ReadHandler` signature.~~ **Done.**
 3. ~~**§10** — Real SPAKE2+ context.~~ **Done.**
 4. ~~**§19-20, §22-23** — PASE messages + state machine + sample wiring + integration test.~~ **Done.**
-5. **§8** — AES-CCM in `crypto`.
+5. ~~**§8** — AES-CCM in `crypto`.~~ **Done.** Wired through `github.com/pion/dtls/v3/pkg/crypto/ccm` (MIT) with a 13-byte nonce + 16-byte tag.
 6. **§9** — Real `NextNonce`.
 7. **§11** — HKDF returning variable-length output.
 8. **§12-15** — Session keys, encrypt/decrypt, counter window, unsecured session.
