@@ -75,3 +75,4 @@ go run samples/commissioning/controller/main.go
 ## 📚 Documentation
 
 *   [PASE Protocol Explanation](docs/PASE_Explainer.md): An in-depth look at the initial handshake protocol.
+*   [Encryption on the Wire](docs/Encryption_Explainer.md): What gets encrypted vs. travels cleartext across PASE, commissioning, CASE, and operational traffic.
