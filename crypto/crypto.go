@@ -77,19 +77,27 @@ func (p *DefaultCryptoProvider) Decrypt(key []byte, nonce []byte, ciphertext []b
 }
 
 func (p *DefaultCryptoProvider) DeriveKeys(secret []byte, salt []byte, info []byte) ([]byte, error) {
-	hash := sha256.New
-	kdf := hkdf.New(hash, secret, salt, info)
+	return HKDF(secret, salt, info, 16)
+}
 
-	// Matter typically derives multiple keys (I2R, R2I, etc)
-	// We just return a chunk of derived bytes here
-	// The caller should specify how much they need reading from returns io.Reader
-	// CHANGED: Simplified to return just enough bytes for a key, or expose io.Reader?
-	// Let's assume we want 16 bytes for now.
-	key := make([]byte, 16)
-	if _, err := io.ReadFull(kdf, key); err != nil {
-		return nil, err
+// HKDF runs the full RFC 5869 Extract-then-Expand pipeline over SHA-256 and
+// returns exactly length bytes of keying material. salt and info may be nil.
+// Matter (§3.10.4, §4.13.2.1) needs variable-length output to expand a single
+// shared secret into multiple typed keys, so a 16-byte-only wrapper would not
+// suffice.
+func HKDF(secret, salt, info []byte, length int) ([]byte, error) {
+	if length < 0 {
+		return nil, errors.New("crypto: HKDF length must be non-negative")
 	}
-	return key, nil
+	out := make([]byte, length)
+	if length == 0 {
+		return out, nil
+	}
+	r := hkdf.New(sha256.New, secret, salt, info)
+	if _, err := io.ReadFull(r, out); err != nil {
+		return nil, fmt.Errorf("crypto: HKDF expand: %w", err)
+	}
+	return out, nil
 }
 
 // ErrCounterExhausted is returned when the 32-bit outbound message
