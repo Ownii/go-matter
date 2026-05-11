@@ -10,16 +10,16 @@ A current-state audit and a recommended order of work to get from the current sc
 | `message/` | **Working** | Matter Message Header + Payload Header encode/decode + fluent `Builder`. Round-trip tested. Secured-frame decryption hook is a TODO. |
 | `crypto/` | **Partial** | SPAKE2+ Prover/Verifier landed (vendored from `tom-code/gomat`, BSD-2-Clause; PBKDF2 + (w0, L) verifier-data helpers; round-trip + locked-transcript tests). AES-CCM (13-byte nonce, 16-byte tag) wired through `github.com/pion/dtls/v3/pkg/crypto/ccm`. `BuildNonce` + `NonceGenerator` produce the §5.3.1 nonce layout with a counter-exhaustion guard and locked-vector test. `HKDF(secret, salt, info, length)` is variable-length (RFC 5869 A.1/A.2/A.3 vectors). `DeriveSessionKeysFromKe` expands `Ke` to `(I2RKey, R2IKey, AttestationChallenge)` per §4.13.2.1 (regression-locked vector). |
 | `transport/` | **Partial** | UDP send/receive operates on `*message.Frame`. No MRP, no encryption hookup. |
-| `session/` | **Stubbed** | `EncryptPayload`/`DecryptPayload` are pass-through. No key derivation, no counter management, no replay window. |
-| `commissioning/` | **PASE complete** | Full 5-message PASE handshake (`PBKDFParamRequest` → `Pake3`) runs end-to-end in `commissioner.go` / `commissionee.go`; both sides reach `StateComplete` with matching 16-byte `Ke`. Wrong-passcode rejection at `VerifyConfirmationB` is tested. **Pending**: HKDF `Ke` → `(I2RKey, R2IKey, AttestationChallenge)` and handoff to `SessionManager`; `Commissioner.StartCASE` is still a stub. |
+| `session/` | **Working (unicast)** | Typed `crypto.SessionKeys` install via `SessionManager.InstallSecureSession(id, local, peer, keys, role)`; role resolves I2R/R2I once. `EncryptPayload`/`DecryptPayload` drive AES-128-CCM with `crypto.BuildNonce` from the cleartext header (also AAD). Outbound counter via `Session.NextOutboundCounter` (returns `crypto.ErrCounterExhausted`). 32-entry sliding replay window (Matter §4.5.4.2) commits only after AEAD auth — tampered frames cannot open gaps. Session ID 0 is pass-through. Group sessions + `MSG_COUNTER_SYNC_REQ` deferred. |
+| `commissioning/` | **PASE complete** | Full 5-message PASE handshake (`PBKDFParamRequest` → `Pake3`) runs end-to-end in `commissioner.go` / `commissionee.go`; both sides reach `StateComplete` with matching 16-byte `Ke`. Wrong-passcode rejection at `VerifyConfirmationB` is tested. **Pending**: `Commissioner.SessionKeys()` / `Commissionee.SessionKeys()` accessors and the `SessionManager.InstallSecureSession` handoff from `Ke` (now that §12 lands the API); `Commissioner.StartCASE` is still a stub. |
 | `discovery/` | **Stubbed** | mDNS advertiser + browser are `return nil` shells. |
 | `interaction/` | **Stubbed** | Read/Write request handlers and senders are TODOs. No Subscribe/Invoke. |
 | `datamodel/` + `model/` | **Skeleton** | Types exist; `Attribute` carries metadata only — no value storage. `DataStore.ReadAttribute` returns `nil, nil`. |
 | `samples/` | **Demo only** | Controller + device drive the full PASE handshake over UDP loopback; both sides log state transitions and the negotiated session ID. Nothing runs after Pake3 (no secured frames, no Interaction Model). |
-| Tests | `tlv/` + `message/` + `crypto/` + `commissioning/` | `interaction/`, `model/`, `transport/`, `session/`, `discovery/` still have zero coverage. |
+| Tests | `tlv/` + `message/` + `crypto/` + `commissioning/` + `session/` | `interaction/`, `model/`, `transport/`, `discovery/` still have zero coverage. |
 | Build/CI | None | No `make`, no GitHub Actions, no lint config. `go build ./...` and `go test ./...` pass. |
 
-PASE produces a working `Ke` on both sides and the crypto needed to use it — AES-CCM, the §5.3.1 nonce layout, variable-length HKDF, and `Ke → (I2RKey, R2IKey, AttestationChallenge)` expansion — is all in place. Nothing post-handshake is encrypted yet because `session.SessionManager.{Encrypt,Decrypt}Payload` are still pass-throughs and the derived keys aren't installed in any session. Phase 4 (§12-15) is the remaining gap before secured frames flow.
+PASE produces a working `Ke` and `session.SessionManager` now actually encrypts: typed keys, AES-128-CCM, replay window, and a session-0 pass-through for the handshake. The last bridge to secured traffic is §21's `Ke → keys → SessionManager.InstallSecureSession` handoff from both `Commissioner` and `Commissionee` (now unblocked by §12), plus the `transport` flip from "pass-through" to "call `MessageSecurity` on every frame."
 
 ---
 
@@ -48,10 +48,10 @@ PASE produces a working `Ke` on both sides and the crypto needed to use it — A
 
 ## Phase 4 — Session layer (depends on 2, 3)
 
-12. **Replace `Session.Keys []byte`** with a typed struct: `{ I2RKey, R2IKey, AttestationChallenge []byte }`. Track direction per encrypt/decrypt call.
-13. **Implement `EncryptPayload`/`DecryptPayload`** using AES-CCM, the per-direction key, and a nonce assembled from the message header.
-14. **Counter management**: bump `OutCounter` on encrypt; validate `InCounter` on decrypt with a sliding replay window (Matter spec recommends 32 entries).
-15. **Unsecured session path** for handshake messages (PASE/CASE messages travel unencrypted before keys exist) — pick a sentinel session ID 0. See [`docs/Messaging_Architecture.md`](docs/Messaging_Architecture.md) — session 0 is the only encrypt/decrypt special case.
+12. ~~**Replace `Session.Keys []byte`**~~ — done. `Session` now embeds typed `EncryptKey` / `DecryptKey` / `AttestationChallenge`, resolved from `crypto.SessionKeys` + `Role` at install time so the hot path never re-branches on direction.
+13. ~~**Implement `EncryptPayload`/`DecryptPayload`**~~ — done. AES-128-CCM via `crypto.DefaultCryptoProvider`; the 13-byte nonce is rebuilt from the cleartext header (`SecurityFlags ‖ MessageCounter ‖ SourceNodeID`) and the header bytes themselves are the AAD (Matter §4.5.3).
+14. ~~**Counter management**~~ — done. Outbound: `Session.NextOutboundCounter` is the explicit, fail-stop counter source (`crypto.ErrCounterExhausted` before wrap, §4.5.1.1). Inbound: a 32-entry sliding window per §4.5.4.2; commit is deferred until AEAD auth succeeds so tampered frames can't open replay gaps. Unicast-only — group sessions (mod-2³¹ rules + `MSG_COUNTER_SYNC_REQ`) are deferred.
+15. ~~**Unsecured session path**~~ — done. `session.UnsecuredSessionID = 0`; `EncryptPayload`/`DecryptPayload` short-circuit before any table lookup, matching `docs/Messaging_Architecture.md`.
 16. **Lifecycle**: `SessionManager.RemoveSession`, expiry, eviction; today `sessions` only grows. PASE sessions are short-lived; CASE sessions persist — see [`docs/Messaging_Architecture.md`](docs/Messaging_Architecture.md).
 
 ## Phase 5 — Transport reliability (depends on 2)
@@ -150,8 +150,8 @@ Strict dependency order, single-developer flat list:
 5. ~~**§8** — AES-CCM in `crypto`.~~ **Done.** Wired through `github.com/pion/dtls/v3/pkg/crypto/ccm` (MIT) with a 13-byte nonce + 16-byte tag.
 6. ~~**§9** — Real `NextNonce`.~~ **Done.** `BuildNonce` + `NonceGenerator` produce the §5.3.1 layout with a counter-exhaustion guard.
 7. ~~**§11** — HKDF returning variable-length output.~~ **Done.** `crypto.HKDF(secret, salt, info, length)` with RFC 5869 KATs.
-8. **§12-15** — Session keys, encrypt/decrypt, counter window, unsecured session.
-9. **§21** — HKDF `Ke` → `(I2RKey, R2IKey, AttestationChallenge)` and `SessionManager.CreateSession` handoff. _Partial_: `crypto.DeriveSessionKeysFromKe` done; the `SessionManager.CreateSession` handoff is still pending and depends on §12.
+8. ~~**§12-15** — Session keys, encrypt/decrypt, counter window, unsecured session.~~ **Done.** Typed `crypto.SessionKeys` + `Role` resolve I2R/R2I at install; AES-128-CCM with header-as-AAD; `Session.NextOutboundCounter` is the fail-stop counter source; 32-entry replay window commits only after AEAD auth; `UnsecuredSessionID = 0` is pass-through. Unicast-only.
+9. **§21** — HKDF `Ke` → `(I2RKey, R2IKey, AttestationChallenge)` and `SessionManager.InstallSecureSession` handoff. _Partial_: `crypto.DeriveSessionKeysFromKe` done; the install handoff is the remaining step now that §12 supplies the API (`SessionManager.InstallSecureSession(id, local, peer, keys, role)`).
 10. **§17-18** — MRP and Exchange Manager.
 11. **§1-5** — Phase 1 TLV polish (insert here once you've felt the pain points from real protocol work).
 12. **§28-30** — mDNS, in parallel with the next steps.
