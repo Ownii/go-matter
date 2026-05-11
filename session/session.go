@@ -50,8 +50,12 @@ const (
 	RoleResponder
 )
 
-// Session is a single secure channel: a pair of AES-128-CCM keys, a
+// Session is a single secure session: a pair of AES-128-CCM keys, a
 // strictly-monotonic outbound counter, and an inbound replay window.
+// Not to be confused with the "Secure Channel" *protocol* (ProtocolID
+// 0x0000, see message/opcodes.go) which owns PASE/CASE/MRP/Status opcodes
+// and runs *inside* a Session's encrypted payload (or on session 0 for
+// the handshake itself).
 //
 // The receiver-side replay window only handles unicast secured sessions;
 // group sessions (Matter §4.5.4.2 group rules + MSG_COUNTER_SYNC_REQ) are
