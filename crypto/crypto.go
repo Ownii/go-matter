@@ -90,9 +90,6 @@ func HKDF(secret, salt, info []byte, length int) ([]byte, error) {
 		return nil, errors.New("crypto: HKDF length must be non-negative")
 	}
 	out := make([]byte, length)
-	if length == 0 {
-		return out, nil
-	}
 	r := hkdf.New(sha256.New, secret, salt, info)
 	if _, err := io.ReadFull(r, out); err != nil {
 		return nil, fmt.Errorf("crypto: HKDF expand: %w", err)

@@ -14,7 +14,7 @@ import (
 func TestDeriveSessionKeysFromKe_Slicing(t *testing.T) {
 	ke := bytes.Repeat([]byte{0x42}, 16)
 
-	full, err := HKDF(ke, nil, []byte(SessionKeyInfo), 3*SessionKeyLength)
+	full, err := HKDF(ke, nil, []byte(SessionKeyInfo), 48)
 	if err != nil {
 		t.Fatalf("HKDF: %v", err)
 	}
@@ -98,9 +98,9 @@ func TestDeriveSessionKeysFromKe_KeysAreDistinct(t *testing.T) {
 	if bytes.Equal(keys.R2IKey, keys.AttestationChallenge) {
 		t.Error("R2IKey == AttestationChallenge")
 	}
-	if len(keys.I2RKey) != SessionKeyLength ||
-		len(keys.R2IKey) != SessionKeyLength ||
-		len(keys.AttestationChallenge) != SessionKeyLength {
+	if len(keys.I2RKey) != 16 ||
+		len(keys.R2IKey) != 16 ||
+		len(keys.AttestationChallenge) != 16 {
 		t.Errorf("unexpected key lengths: %d/%d/%d",
 			len(keys.I2RKey), len(keys.R2IKey), len(keys.AttestationChallenge))
 	}
