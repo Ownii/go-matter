@@ -51,23 +51,25 @@ PASE produces a working `Ke` on both sides but nothing post-handshake is encrypt
 12. **Replace `Session.Keys []byte`** with a typed struct: `{ I2RKey, R2IKey, AttestationChallenge []byte }`. Track direction per encrypt/decrypt call.
 13. **Implement `EncryptPayload`/`DecryptPayload`** using AES-CCM, the per-direction key, and a nonce assembled from the message header.
 14. **Counter management**: bump `OutCounter` on encrypt; validate `InCounter` on decrypt with a sliding replay window (Matter spec recommends 32 entries).
-15. **Unsecured session path** for handshake messages (PASE/CASE messages travel unencrypted before keys exist) — pick a sentinel session ID 0.
-16. **Lifecycle**: `SessionManager.RemoveSession`, expiry, eviction; today `sessions` only grows.
+15. **Unsecured session path** for handshake messages (PASE/CASE messages travel unencrypted before keys exist) — pick a sentinel session ID 0. See [`docs/Messaging_Architecture.md`](docs/Messaging_Architecture.md) — session 0 is the only encrypt/decrypt special case.
+16. **Lifecycle**: `SessionManager.RemoveSession`, expiry, eviction; today `sessions` only grows. PASE sessions are short-lived; CASE sessions persist — see [`docs/Messaging_Architecture.md`](docs/Messaging_Architecture.md).
 
 ## Phase 5 — Transport reliability (depends on 2)
 
-17. **MRP (Message Reliability Protocol)** in `transport/`:
+> **Architectural contract:** §17 and §18 are where commissioning and operational converge onto a single message-handling stack. Read [`docs/Messaging_Architecture.md`](docs/Messaging_Architecture.md) before starting either — in particular, MRP retx belongs on `ExchangeManager`, not on `TransportManager`, and the `*Exchange` type defined here is what `commissioning/`, future CASE code, and the Interaction Model all consume.
+
+17. **MRP (Message Reliability Protocol)** on the new `ExchangeManager` (not on `transport/`; see [`docs/Messaging_Architecture.md`](docs/Messaging_Architecture.md)):
     - Per-exchange retransmission with backoff (`MRP_BACKOFF_BASE`, `MRP_BACKOFF_THRESHOLD` from spec).
     - Standalone Ack messages.
     - Duplicate detection by `(SourceNodeID, MessageCounter)`.
-    - The `unackedMessages map[uint32]interface{}` field on `TransportManager` is the placeholder for this — give it a real type.
-18. **Exchange Manager** — `transport` (or a new `exchange/` package) needs to track active exchanges and route inbound messages by Exchange ID. Today, the `ReadHandler` is called blindly.
+    - The `unackedMessages map[uint32]interface{}` field on `TransportManager` is the placeholder for this — give it a real type and move it.
+18. **Exchange Manager** — new `exchange/` package, tracks active exchanges and routes inbound messages by `(SessionID, ExchangeID)`. Owns the per-exchange goroutine + retx timer. Today, the `ReadHandler` is called blindly. Defines `*Exchange { Inbox <-chan *Frame; Send(payload) error }` consumed by commissioning, CASE, and IM. See [`docs/Messaging_Architecture.md`](docs/Messaging_Architecture.md) for the contract; **after this lands, `commissioning/` must be refactored to use `*Exchange` instead of `CommissioningMessenger`.**
 
 ## Phase 6 — Complete PASE — **DONE**
 
 19. ~~**`PBKDFParamResponse` struct + handler**~~ — done. `commissioning/messages.go` defines `PBKDFParamResponse` + nested `PBKDFParamSet`; `Commissionee.handlePBKDFParamRequest` decodes the request and replies with salt/iterations/responder-random/session-ID.
 20. ~~**Pake1 / Pake2 / Pake3 structs and state transitions**~~ — done. Wire structs in `commissioning/messages.go`; `commissioning.paseContext` builds the SPAKE2+ context input (`"CHIP PAKE V1 Commissioning" || PBKDFParamRequest || PBKDFParamResponse`, Matter §3.10) and `crypto.spakeFinalize` hashes it. Commissioner runs `Spake2pW0W1FromPasscode → NewSPAKE2PProver → ComputePA → Finalize(pB) → VerifyConfirmationB → ConfirmationA`. Commissionee runs `NewSPAKE2PVerifier(W0,L,ctx) → ComputePB(pA) → Finalize → ConfirmationB → VerifyConfirmationA`. Both reach `StateComplete` with the same 16-byte `Ke`.
-21. **Derive session keys from `Ke` and hand to `SessionManager`** — _pending_. `Ke` is produced and stored on `Commissioner.Ke` / `Commissionee.Ke` but no HKDF expansion to `(I2RKey, R2IKey, AttestationChallenge)` and no `SessionManager.CreateSession` handoff yet. Blocked by Phase 3 §11 (variable-length HKDF) and Phase 4 §12-13 (typed key struct + AES-CCM encrypt/decrypt).
+21. **Derive session keys from `Ke` and hand to `SessionManager`** — _pending_. `Ke` is produced and stored on `Commissioner.Ke` / `Commissionee.Ke` but no HKDF expansion to `(I2RKey, R2IKey, AttestationChallenge)` and no `SessionManager.CreateSession` handoff yet. Blocked by Phase 3 §11 (variable-length HKDF) and Phase 4 §12-13 (typed key struct + AES-CCM encrypt/decrypt). This handoff is the bridge from "PASE on unsecured session 0" to "post-Pake3 commissioning on the PASE-secure session" — the latter is then ordinary Interaction Model traffic per [`docs/Messaging_Architecture.md`](docs/Messaging_Architecture.md). Do not implement `ArmFailSafe`/`CSRRequest`/`AddNOC`/`CommissioningComplete` as bespoke commissioning opcodes; they are `Invoke` calls.
 22. ~~**Wire commissionee receive path**~~ — done. The device sample (`samples/commissioning/device/main.go`) dispatches into `Commissionee.HandleMessage`, the controller sample consumes responses via `Commissioner.HandleMessage`, and a `deviceMessenger` sends replies back to the originating UDP peer.
 23. ~~**Tests**~~ — done. `commissioning/commissioning_test.go` covers `PBKDFParamResponse` TLV round-trip, `omitempty` on `Params`, full in-memory PASE loopback (`TestPASE_Loopback`), wrong-passcode rejection at `VerifyConfirmationB` (`TestPASE_WrongPasscode`), and `Commissioner.HandleMessage` error paths.
 
@@ -75,8 +77,8 @@ PASE produces a working `Ke` on both sides but nothing post-handshake is encrypt
 
 24. **NOC / ICAC / RCAC certificate handling** in `crypto/` (X.509 parsing, Matter-specific extensions, signature verification with P-256).
 25. **Fabric table** in `model.Fabric` — store RootCert, NOC, ICAC, fabric ID, node ID, IPK. Persist (see Phase 9).
-26. **CASE handshake messages** (Sigma1, Sigma2, Sigma3) in `commissioning/`. Reuse the framing/transcript pattern from PASE.
-27. **`Commissioner.StartCASE`** body (currently a 3-line stub in `commissioning/commissioner.go`).
+26. **CASE handshake messages** (Sigma1, Sigma2, Sigma3) in `commissioning/`. Reuse the framing/transcript pattern from PASE. Like PASE, the CASE state machine consumes an `*Exchange` — do not reintroduce a CASE-specific messenger/routing path. See [`docs/Messaging_Architecture.md`](docs/Messaging_Architecture.md).
+27. **`Commissioner.StartCASE`** body (currently a 3-line stub in `commissioning/commissioner.go`). Establishes the CASE-secure session that supplants the PASE-secure session for operational traffic — see [`docs/Messaging_Architecture.md`](docs/Messaging_Architecture.md) for the session-lifecycle expectations.
 
 ## Phase 8 — Discovery (independent, can run in parallel with 4-6)
 
@@ -86,11 +88,13 @@ PASE produces a working `Ke` on both sides but nothing post-handshake is encrypt
 
 ## Phase 9 — Interaction Model (depends on 4, 6)
 
+> All IM handlers consume `*Exchange` (see [`docs/Messaging_Architecture.md`](docs/Messaging_Architecture.md)). Post-Pake3 commissioning opcodes (`ArmFailSafe`, `CSRRequest`, `AddNOC`, `CommissioningComplete`) are `Invoke` calls handled here, not separate commissioning messages.
+
 31. **Interaction Model message types**: `ReadRequestMessage`, `ReportDataMessage`, `WriteRequestMessage`, `WriteResponseMessage`, `InvokeRequestMessage`, `InvokeResponseMessage`, `SubscribeRequestMessage`, `SubscribeResponseMessage`, `StatusResponseMessage`, `TimedRequestMessage`. Each as a Go struct with TLV tags.
 32. **Path types**: `AttributePathIB`, `CommandPathIB`, `EventPathIB`. Handle wildcards (NodeID/Endpoint/Cluster/Attribute = nullable).
 33. **Dispatch**: in `InteractionModel.HandleReadRequest`, parse paths, walk `AttributeStore`, build `AttributeReportIB` list, send `ReportData`.
 34. **Status codes** (`Success`, `UnsupportedAttribute`, `InvalidAction`, etc.) — define an enum and use it for errors.
-35. **Subscriptions**: subscription manager that holds active subscriptions per session and emits reports on attribute change. This requires a notification channel from `model.DataStore`.
+35. **Subscriptions**: subscription manager that holds active subscriptions per session and emits reports on attribute change. This requires a notification channel from `model.DataStore` — the canonical channel-based fan-out point in the architecture; see [`docs/Messaging_Architecture.md`](docs/Messaging_Architecture.md).
 36. **Invoke**: command dispatch table on `Cluster`, request/response TLV structs per command.
 
 ## Phase 10 — Data model fleshing (depends on 9)
