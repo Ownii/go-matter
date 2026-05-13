@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"go-matter/message"
+	"go-matter/session"
 	"go-matter/tlv"
 )
 
@@ -50,25 +51,29 @@ func TestPBKDFParamResponse_TLVRoundTrip(t *testing.T) {
 	}
 }
 
-func pasePair(t *testing.T, devicePasscode, controllerPasscode uint32) (*Commissioner, *Commissionee, error) {
+func pasePair(t *testing.T, devicePasscode, controllerPasscode uint32) (
+	*Commissioner, *Commissionee, *session.SessionManager, *session.SessionManager, error,
+) {
 	t.Helper()
 	salt := []byte("SPAKE2P Key Salt")
 	const iterations = 1000
-	commissionee, err := NewCommissionee(devicePasscode, salt, iterations)
+	commissionerSM := session.NewSessionManager(nil)
+	commissioneeSM := session.NewSessionManager(nil)
+	commissionee, err := NewCommissionee(devicePasscode, salt, iterations, commissioneeSM)
 	if err != nil {
 		t.Fatal(err)
 	}
-	commissioner := NewCommissioner(nil)
+	commissioner := NewCommissioner(nil, commissionerSM)
 	deviceMsg, controllerMsg := &loopMessenger{}, &loopMessenger{}
 	commissionee.Messenger, commissioner.Messenger = deviceMsg, controllerMsg
 	deviceMsg.deliver = commissioner.HandleMessage
 	controllerMsg.deliver = commissionee.HandleMessage
-	return commissioner, commissionee, commissioner.StartPASE(controllerPasscode)
+	return commissioner, commissionee, commissionerSM, commissioneeSM, commissioner.StartPASE(controllerPasscode)
 }
 
 func TestPASE_Loopback(t *testing.T) {
 	const passcode = uint32(12345678)
-	commissioner, commissionee, err := pasePair(t, passcode, passcode)
+	commissioner, commissionee, _, _, err := pasePair(t, passcode, passcode)
 	if err != nil {
 		t.Fatalf("PASE handshake: %v", err)
 	}
@@ -94,7 +99,7 @@ func TestPASE_Loopback(t *testing.T) {
 }
 
 func TestPASE_WrongPasscode(t *testing.T) {
-	commissioner, commissionee, err := pasePair(t, 12345678, 99999999)
+	commissioner, commissionee, _, _, err := pasePair(t, 12345678, 99999999)
 	if err == nil {
 		t.Fatal("expected handshake to fail with mismatched passcode, got nil error")
 	}
@@ -132,7 +137,7 @@ func TestCommissioner_HandleMessage_Errors(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			c := NewCommissioner(nil)
+			c := NewCommissioner(nil, session.NewSessionManager(nil))
 			c.Random = bytes.Repeat([]byte{0x11}, 32)
 			payload, _ := tlv.Marshal(&tc.resp)
 			frame := &message.Frame{

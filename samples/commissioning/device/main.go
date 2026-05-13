@@ -7,6 +7,7 @@ import (
 
 	"go-matter/commissioning"
 	"go-matter/message"
+	"go-matter/session"
 	"go-matter/transport"
 )
 
@@ -27,8 +28,9 @@ func (m *deviceMessenger) SendMessage(frame *message.Frame) error {
 func main() {
 	const devicePort = 5540
 
+	sm := session.NewSessionManager(nil)
 	commissionee, err := commissioning.NewCommissionee(
-		12345678, []byte("SPAKE2P Key Salt"), 1000)
+		12345678, []byte("SPAKE2P Key Salt"), 1000, sm)
 	if err != nil {
 		panic(err)
 	}

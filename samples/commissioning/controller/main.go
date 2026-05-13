@@ -7,6 +7,7 @@ import (
 
 	"go-matter/commissioning"
 	"go-matter/message"
+	"go-matter/session"
 	"go-matter/transport"
 )
 
@@ -30,7 +31,8 @@ func main() {
 	}
 	defer tm.Close()
 
-	commissioner := commissioning.NewCommissioner(&controllerMessenger{tm: tm, deviceAddr: deviceAddr})
+	sm := session.NewSessionManager(nil)
+	commissioner := commissioning.NewCommissioner(&controllerMessenger{tm: tm, deviceAddr: deviceAddr}, sm)
 
 	go func() {
 		fmt.Printf("Controller listening on %d...\n", ctrlPort)

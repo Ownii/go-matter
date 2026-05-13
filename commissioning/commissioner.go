@@ -8,6 +8,7 @@ import (
 
 	"go-matter/crypto"
 	"go-matter/message"
+	"go-matter/session"
 )
 
 // Commissioner drives the PASE handshake from the controller (initiator) side.
@@ -17,6 +18,7 @@ import (
 type Commissioner struct {
 	State          CommissioningState
 	Messenger      CommissioningMessenger
+	SessionManager *session.SessionManager
 	Passcode       uint32
 	Random         []byte
 	SessionID      uint16
@@ -36,8 +38,11 @@ type Commissioner struct {
 	prover *crypto.SPAKE2PProver
 }
 
-func NewCommissioner(messenger CommissioningMessenger) *Commissioner {
-	return &Commissioner{State: StateIdle, Messenger: messenger}
+// NewCommissioner constructs a Commissioner. sm must not be nil — PASE
+// produces a secure session which is installed in sm after Pake2; passing
+// nil is a programmer error and will nil-deref on first install attempt.
+func NewCommissioner(messenger CommissioningMessenger, sm *session.SessionManager) *Commissioner {
+	return &Commissioner{State: StateIdle, Messenger: messenger, SessionManager: sm}
 }
 
 func (c *Commissioner) StartPASE(passcode uint32) error {
