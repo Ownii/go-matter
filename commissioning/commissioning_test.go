@@ -98,6 +98,26 @@ func TestPASE_Loopback(t *testing.T) {
 	}
 }
 
+func TestPASE_InstallsSecureSession_Commissioner(t *testing.T) {
+	const passcode = uint32(12345678)
+	commissioner, _, commissionerSM, _, err := pasePair(t, passcode, passcode)
+	if err != nil {
+		t.Fatalf("PASE handshake: %v", err)
+	}
+
+	s, ok := commissionerSM.Session(commissioner.SessionID)
+	if !ok {
+		t.Fatalf("commissioner session %d not installed", commissioner.SessionID)
+	}
+	if s.LocalNodeID != session.UnspecifiedNodeID || s.PeerNodeID != session.UnspecifiedNodeID {
+		t.Errorf("PASE NodeIDs must be UnspecifiedNodeID, got local=%d peer=%d", s.LocalNodeID, s.PeerNodeID)
+	}
+	if len(s.EncryptKey) != 16 || len(s.DecryptKey) != 16 || len(s.AttestationChallenge) != 16 {
+		t.Errorf("expected three 16-byte keys, got encrypt=%d decrypt=%d attestation=%d",
+			len(s.EncryptKey), len(s.DecryptKey), len(s.AttestationChallenge))
+	}
+}
+
 func TestPASE_WrongPasscode(t *testing.T) {
 	commissioner, commissionee, _, _, err := pasePair(t, 12345678, 99999999)
 	if err == nil {
