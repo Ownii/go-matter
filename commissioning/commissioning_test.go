@@ -166,6 +166,84 @@ func TestPASE_WrongPasscode(t *testing.T) {
 	}
 }
 
+// buildSecuredHeader produces the wire bytes of a minimal unicast
+// secured-frame header. The bytes act both as AEAD AAD and as the input
+// from which both peers reconstruct the AES-CCM nonce. For PASE-secure
+// sessions the S-flag is not set, so SourceNodeID is implicit zero on
+// the wire (matching connectedhomeip's secure-session send path).
+func buildSecuredHeader(t *testing.T, destSessionID uint16, counter uint32) []byte {
+	t.Helper()
+	h := message.Header{
+		SessionID:      destSessionID,
+		SecurityFlags:  message.SessionTypeUnicast,
+		MessageCounter: counter,
+	}
+	b, err := h.Marshal()
+	if err != nil {
+		t.Fatalf("Header.Marshal: %v", err)
+	}
+	return b
+}
+
+func TestPASE_CrossEncryptRoundtrip(t *testing.T) {
+	const passcode = uint32(12345678)
+	commissioner, commissionee, commissionerSM, commissioneeSM, err := pasePair(t, passcode, passcode)
+	if err != nil {
+		t.Fatalf("PASE handshake: %v", err)
+	}
+
+	// Commissioner → Commissionee.
+	{
+		plaintext := []byte("hello from commissioner")
+		commSess, _ := commissionerSM.Session(commissioner.SessionID)
+		counter, err := commSess.NextOutboundCounter()
+		if err != nil {
+			t.Fatalf("commissioner NextOutboundCounter: %v", err)
+		}
+		// Frame's SessionID field carries the peer's chosen ID (so the
+		// peer routes the frame to its own table entry on receipt).
+		header := buildSecuredHeader(t, commissionee.SessionID, counter)
+
+		ct, err := commissionerSM.EncryptPayload(commissioner.SessionID, plaintext, header)
+		if err != nil {
+			t.Fatalf("commissioner EncryptPayload: %v", err)
+		}
+		if bytes.Equal(ct, plaintext) {
+			t.Fatalf("ciphertext equals plaintext: AEAD did not run")
+		}
+		pt, err := commissioneeSM.DecryptPayload(commissionee.SessionID, ct, header)
+		if err != nil {
+			t.Fatalf("commissionee DecryptPayload (forward): %v", err)
+		}
+		if !bytes.Equal(pt, plaintext) {
+			t.Fatalf("forward roundtrip mismatch: got %q want %q", pt, plaintext)
+		}
+	}
+
+	// Commissionee → Commissioner.
+	{
+		plaintext := []byte("hello back from commissionee")
+		devSess, _ := commissioneeSM.Session(commissionee.SessionID)
+		counter, err := devSess.NextOutboundCounter()
+		if err != nil {
+			t.Fatalf("commissionee NextOutboundCounter: %v", err)
+		}
+		header := buildSecuredHeader(t, commissioner.SessionID, counter)
+
+		ct, err := commissioneeSM.EncryptPayload(commissionee.SessionID, plaintext, header)
+		if err != nil {
+			t.Fatalf("commissionee EncryptPayload: %v", err)
+		}
+		pt, err := commissionerSM.DecryptPayload(commissioner.SessionID, ct, header)
+		if err != nil {
+			t.Fatalf("commissioner DecryptPayload (reverse): %v", err)
+		}
+		if !bytes.Equal(pt, plaintext) {
+			t.Fatalf("reverse roundtrip mismatch: got %q want %q", pt, plaintext)
+		}
+	}
+}
+
 func TestCommissioner_HandleMessage_Errors(t *testing.T) {
 	tests := []struct {
 		name string
