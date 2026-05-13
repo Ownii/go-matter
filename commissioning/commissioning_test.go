@@ -15,6 +15,36 @@ type loopMessenger struct {
 
 func (l *loopMessenger) SendMessage(f *message.Frame) error { return l.deliver(f) }
 
+type pasePeers struct {
+	Commissioner   *Commissioner
+	Commissionee   *Commissionee
+	CommissionerSM *session.SessionManager
+	CommissioneeSM *session.SessionManager
+}
+
+func setupPASEPeers(t *testing.T, devicePasscode, controllerPasscode uint32) (*pasePeers, error) {
+	t.Helper()
+	salt := []byte("SPAKE2P Key Salt")
+	const iterations = 1000
+	commissionerSM := session.NewSessionManager(nil)
+	commissioneeSM := session.NewSessionManager(nil)
+	commissionee, err := NewCommissionee(devicePasscode, salt, iterations, commissioneeSM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commissioner := NewCommissioner(nil, commissionerSM)
+	deviceMsg, controllerMsg := &loopMessenger{}, &loopMessenger{}
+	commissionee.Messenger, commissioner.Messenger = deviceMsg, controllerMsg
+	deviceMsg.deliver = commissioner.HandleMessage
+	controllerMsg.deliver = commissionee.HandleMessage
+	return &pasePeers{
+		Commissioner:   commissioner,
+		Commissionee:   commissionee,
+		CommissionerSM: commissionerSM,
+		CommissioneeSM: commissioneeSM,
+	}, commissioner.StartPASE(controllerPasscode)
+}
+
 func TestPBKDFParamResponse_TLVRoundTrip(t *testing.T) {
 	want := PBKDFParamResponse{
 		InitiatorRandom:    bytes.Repeat([]byte{0xab}, 32),
@@ -51,32 +81,13 @@ func TestPBKDFParamResponse_TLVRoundTrip(t *testing.T) {
 	}
 }
 
-func pasePair(t *testing.T, devicePasscode, controllerPasscode uint32) (
-	*Commissioner, *Commissionee, *session.SessionManager, *session.SessionManager, error,
-) {
-	t.Helper()
-	salt := []byte("SPAKE2P Key Salt")
-	const iterations = 1000
-	commissionerSM := session.NewSessionManager(nil)
-	commissioneeSM := session.NewSessionManager(nil)
-	commissionee, err := NewCommissionee(devicePasscode, salt, iterations, commissioneeSM)
-	if err != nil {
-		t.Fatal(err)
-	}
-	commissioner := NewCommissioner(nil, commissionerSM)
-	deviceMsg, controllerMsg := &loopMessenger{}, &loopMessenger{}
-	commissionee.Messenger, commissioner.Messenger = deviceMsg, controllerMsg
-	deviceMsg.deliver = commissioner.HandleMessage
-	controllerMsg.deliver = commissionee.HandleMessage
-	return commissioner, commissionee, commissionerSM, commissioneeSM, commissioner.StartPASE(controllerPasscode)
-}
-
 func TestPASE_Loopback(t *testing.T) {
 	const passcode = uint32(12345678)
-	commissioner, commissionee, _, _, err := pasePair(t, passcode, passcode)
+	peers, err := setupPASEPeers(t, passcode, passcode)
 	if err != nil {
 		t.Fatalf("PASE handshake: %v", err)
 	}
+	commissioner, commissionee := peers.Commissioner, peers.Commissionee
 
 	if commissioner.State != StateComplete || commissionee.State != StateComplete {
 		t.Errorf("states: commissioner=%d commissionee=%d, want Complete=%d",
@@ -100,14 +111,14 @@ func TestPASE_Loopback(t *testing.T) {
 
 func TestPASE_InstallsSecureSession_Commissioner(t *testing.T) {
 	const passcode = uint32(12345678)
-	commissioner, _, commissionerSM, _, err := pasePair(t, passcode, passcode)
+	peers, err := setupPASEPeers(t, passcode, passcode)
 	if err != nil {
 		t.Fatalf("PASE handshake: %v", err)
 	}
 
-	s, ok := commissionerSM.Session(commissioner.SessionID)
+	s, ok := peers.CommissionerSM.Session(peers.Commissioner.SessionID)
 	if !ok {
-		t.Fatalf("commissioner session %d not installed", commissioner.SessionID)
+		t.Fatalf("commissioner session %d not installed", peers.Commissioner.SessionID)
 	}
 	if s.LocalNodeID != session.UnspecifiedNodeID || s.PeerNodeID != session.UnspecifiedNodeID {
 		t.Errorf("PASE NodeIDs must be UnspecifiedNodeID, got local=%d peer=%d", s.LocalNodeID, s.PeerNodeID)
@@ -120,18 +131,18 @@ func TestPASE_InstallsSecureSession_Commissioner(t *testing.T) {
 
 func TestPASE_InstallsSecureSession_Commissionee(t *testing.T) {
 	const passcode = uint32(12345678)
-	commissioner, commissionee, commissionerSM, commissioneeSM, err := pasePair(t, passcode, passcode)
+	peers, err := setupPASEPeers(t, passcode, passcode)
 	if err != nil {
 		t.Fatalf("PASE handshake: %v", err)
 	}
 
-	commSess, ok := commissionerSM.Session(commissioner.SessionID)
+	commSess, ok := peers.CommissionerSM.Session(peers.Commissioner.SessionID)
 	if !ok {
-		t.Fatalf("commissioner session not installed (Task 3 precondition)")
+		t.Fatalf("commissioner session not installed; commissionee mirroring check needs commissioner side present")
 	}
-	devSess, ok := commissioneeSM.Session(commissionee.SessionID)
+	devSess, ok := peers.CommissioneeSM.Session(peers.Commissionee.SessionID)
 	if !ok {
-		t.Fatalf("commissionee session %d not installed", commissionee.SessionID)
+		t.Fatalf("commissionee session %d not installed", peers.Commissionee.SessionID)
 	}
 
 	if devSess.LocalNodeID != session.UnspecifiedNodeID || devSess.PeerNodeID != session.UnspecifiedNodeID {
@@ -153,10 +164,11 @@ func TestPASE_InstallsSecureSession_Commissionee(t *testing.T) {
 }
 
 func TestPASE_WrongPasscode(t *testing.T) {
-	commissioner, commissionee, _, _, err := pasePair(t, 12345678, 99999999)
+	peers, err := setupPASEPeers(t, 12345678, 99999999)
 	if err == nil {
 		t.Fatal("expected handshake to fail with mismatched passcode, got nil error")
 	}
+	commissioner, commissionee := peers.Commissioner, peers.Commissionee
 	if commissioner.State == StateComplete || commissionee.State == StateComplete {
 		t.Errorf("states should not reach Complete on bad passcode: commissioner=%d commissionee=%d",
 			commissioner.State, commissionee.State)
@@ -187,61 +199,48 @@ func buildSecuredHeader(t *testing.T, destSessionID uint16, counter uint32) []by
 
 func TestPASE_CrossEncryptRoundtrip(t *testing.T) {
 	const passcode = uint32(12345678)
-	commissioner, commissionee, commissionerSM, commissioneeSM, err := pasePair(t, passcode, passcode)
+	peers, err := setupPASEPeers(t, passcode, passcode)
 	if err != nil {
 		t.Fatalf("PASE handshake: %v", err)
 	}
 
-	// Commissioner → Commissionee.
-	{
-		plaintext := []byte("hello from commissioner")
-		commSess, _ := commissionerSM.Session(commissioner.SessionID)
-		counter, err := commSess.NextOutboundCounter()
+	expectRoundtrip := func(label string, plaintext []byte,
+		senderSM *session.SessionManager, senderID uint16,
+		recipientSM *session.SessionManager, recipientID uint16,
+	) {
+		t.Helper()
+		senderSess, _ := senderSM.Session(senderID)
+		counter, err := senderSess.NextOutboundCounter()
 		if err != nil {
-			t.Fatalf("commissioner NextOutboundCounter: %v", err)
+			t.Fatalf("%s: NextOutboundCounter: %v", label, err)
 		}
 		// Frame's SessionID field carries the peer's chosen ID (so the
 		// peer routes the frame to its own table entry on receipt).
-		header := buildSecuredHeader(t, commissionee.SessionID, counter)
+		header := buildSecuredHeader(t, recipientID, counter)
 
-		ct, err := commissionerSM.EncryptPayload(commissioner.SessionID, plaintext, header)
+		ct, err := senderSM.EncryptPayload(senderID, plaintext, header)
 		if err != nil {
-			t.Fatalf("commissioner EncryptPayload: %v", err)
+			t.Fatalf("%s: EncryptPayload: %v", label, err)
 		}
 		if bytes.Equal(ct, plaintext) {
-			t.Fatalf("ciphertext equals plaintext: AEAD did not run")
+			t.Fatalf("%s: ciphertext equals plaintext: AEAD did not run", label)
 		}
-		pt, err := commissioneeSM.DecryptPayload(commissionee.SessionID, ct, header)
+		pt, err := recipientSM.DecryptPayload(recipientID, ct, header)
 		if err != nil {
-			t.Fatalf("commissionee DecryptPayload (forward): %v", err)
+			t.Fatalf("%s: DecryptPayload: %v", label, err)
 		}
 		if !bytes.Equal(pt, plaintext) {
-			t.Fatalf("forward roundtrip mismatch: got %q want %q", pt, plaintext)
+			t.Fatalf("%s: roundtrip mismatch: got %q want %q", label, pt, plaintext)
 		}
 	}
 
-	// Commissionee → Commissioner.
-	{
-		plaintext := []byte("hello back from commissionee")
-		devSess, _ := commissioneeSM.Session(commissionee.SessionID)
-		counter, err := devSess.NextOutboundCounter()
-		if err != nil {
-			t.Fatalf("commissionee NextOutboundCounter: %v", err)
-		}
-		header := buildSecuredHeader(t, commissioner.SessionID, counter)
+	expectRoundtrip("commissioner→commissionee", []byte("hello from commissioner"),
+		peers.CommissionerSM, peers.Commissioner.SessionID,
+		peers.CommissioneeSM, peers.Commissionee.SessionID)
 
-		ct, err := commissioneeSM.EncryptPayload(commissionee.SessionID, plaintext, header)
-		if err != nil {
-			t.Fatalf("commissionee EncryptPayload: %v", err)
-		}
-		pt, err := commissionerSM.DecryptPayload(commissioner.SessionID, ct, header)
-		if err != nil {
-			t.Fatalf("commissioner DecryptPayload (reverse): %v", err)
-		}
-		if !bytes.Equal(pt, plaintext) {
-			t.Fatalf("reverse roundtrip mismatch: got %q want %q", pt, plaintext)
-		}
-	}
+	expectRoundtrip("commissionee→commissioner", []byte("hello back from commissionee"),
+		peers.CommissioneeSM, peers.Commissionee.SessionID,
+		peers.CommissionerSM, peers.Commissioner.SessionID)
 }
 
 func TestCommissioner_HandleMessage_Errors(t *testing.T) {
