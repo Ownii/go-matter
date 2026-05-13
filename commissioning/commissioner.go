@@ -151,15 +151,9 @@ func (c *Commissioner) handlePake2(frame *message.Frame) error {
 		return err
 	}
 
-	keys, err := crypto.DeriveSessionKeysFromKe(c.Ke)
-	if err != nil {
-		return fmt.Errorf("commissioner: derive session keys: %w", err)
+	if err := installPASESession(c.sessionManager, c.SessionID, c.Ke, session.RoleInitiator); err != nil {
+		return fmt.Errorf("commissioner: %w", err)
 	}
-	c.sessionManager.InstallSecureSession(
-		c.SessionID,
-		session.UnspecifiedNodeID, session.UnspecifiedNodeID,
-		keys, session.RoleInitiator,
-	)
 
 	out, err := c.buildFrame(message.OpcodePASEPake3, frame.Header.MessageCounter, &Pake3{CA: cA})
 	if err != nil {

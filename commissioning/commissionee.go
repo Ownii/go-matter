@@ -153,15 +153,9 @@ func (c *Commissionee) handlePake3(frame *message.Frame) error {
 	}
 	c.Ke = ke
 
-	keys, err := crypto.DeriveSessionKeysFromKe(c.Ke)
-	if err != nil {
-		return fmt.Errorf("commissionee: derive session keys: %w", err)
+	if err := installPASESession(c.sessionManager, c.SessionID, c.Ke, session.RoleResponder); err != nil {
+		return fmt.Errorf("commissionee: %w", err)
 	}
-	c.sessionManager.InstallSecureSession(
-		c.SessionID,
-		session.UnspecifiedNodeID, session.UnspecifiedNodeID,
-		keys, session.RoleResponder,
-	)
 
 	c.State = StateComplete
 	return nil

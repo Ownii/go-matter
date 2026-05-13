@@ -7,8 +7,11 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
+	"fmt"
 
+	"go-matter/crypto"
 	"go-matter/message"
+	"go-matter/session"
 	"go-matter/tlv"
 )
 
@@ -73,5 +76,17 @@ func bumpCounter(ctr *uint32) error {
 		return nil
 	}
 	*ctr++
+	return nil
+}
+
+// installPASESession derives the AES-CCM session keys from Ke
+// (Matter §4.13.2.1) and registers them in sm under id with role.
+// Called by both PASE handlers once SharedKey() has succeeded.
+func installPASESession(sm *session.SessionManager, id uint16, ke []byte, role session.Role) error {
+	keys, err := crypto.DeriveSessionKeysFromKe(ke)
+	if err != nil {
+		return fmt.Errorf("derive session keys: %w", err)
+	}
+	sm.InstallSecureSession(id, session.UnspecifiedNodeID, session.UnspecifiedNodeID, keys, role)
 	return nil
 }
