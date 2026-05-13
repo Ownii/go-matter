@@ -57,6 +57,12 @@ func main() {
 		}
 		fmt.Printf("Commissionee state=%d sessionID=%d responderRandom=%x\n",
 			commissionee.State, commissionee.SessionID, commissionee.Random)
+		if commissionee.State == commissioning.StateComplete {
+			if s, ok := sm.Session(commissionee.SessionID); ok {
+				fmt.Printf("Commissionee installed PASE-secure session id=%d attestationPrefix=%x\n",
+					commissionee.SessionID, s.AttestationChallenge[:4])
+			}
+		}
 	})
 	if err != nil {
 		fmt.Printf("Transport error: %v\n", err)
