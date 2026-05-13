@@ -18,7 +18,7 @@ import (
 type Commissioner struct {
 	State          CommissioningState
 	Messenger      CommissioningMessenger
-	SessionManager *session.SessionManager
+	sessionManager *session.SessionManager
 	Passcode       uint32
 	Random         []byte
 	SessionID      uint16
@@ -40,9 +40,12 @@ type Commissioner struct {
 
 // NewCommissioner constructs a Commissioner. sm must not be nil — PASE
 // produces a secure session which is installed in sm after Pake2; passing
-// nil is a programmer error and will nil-deref on first install attempt.
+// nil panics immediately rather than nil-derefing mid-handshake.
 func NewCommissioner(messenger CommissioningMessenger, sm *session.SessionManager) *Commissioner {
-	return &Commissioner{State: StateIdle, Messenger: messenger, SessionManager: sm}
+	if sm == nil {
+		panic("commissioning: NewCommissioner requires a non-nil SessionManager")
+	}
+	return &Commissioner{State: StateIdle, Messenger: messenger, sessionManager: sm}
 }
 
 func (c *Commissioner) StartPASE(passcode uint32) error {
@@ -152,7 +155,7 @@ func (c *Commissioner) handlePake2(frame *message.Frame) error {
 	if err != nil {
 		return fmt.Errorf("commissioner: derive session keys: %w", err)
 	}
-	c.SessionManager.InstallSecureSession(
+	c.sessionManager.InstallSecureSession(
 		c.SessionID,
 		session.UnspecifiedNodeID, session.UnspecifiedNodeID,
 		keys, session.RoleInitiator,

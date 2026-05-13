@@ -22,7 +22,7 @@ type Commissionee struct {
 	Random     []byte
 
 	Messenger      CommissioningMessenger
-	SessionManager *session.SessionManager
+	sessionManager *session.SessionManager
 	SessionID      uint16
 	MessageCounter uint32
 
@@ -47,7 +47,7 @@ func NewCommissionee(passcode uint32, salt []byte, iterations int, sm *session.S
 	}
 	return &Commissionee{
 		State:          StateIdle,
-		SessionManager: sm,
+		sessionManager: sm,
 		Salt:           append([]byte(nil), salt...),
 		Iterations:     uint32(iterations),
 		W0:             w0,
@@ -157,7 +157,7 @@ func (c *Commissionee) handlePake3(frame *message.Frame) error {
 	if err != nil {
 		return fmt.Errorf("commissionee: derive session keys: %w", err)
 	}
-	c.SessionManager.InstallSecureSession(
+	c.sessionManager.InstallSecureSession(
 		c.SessionID,
 		session.UnspecifiedNodeID, session.UnspecifiedNodeID,
 		keys, session.RoleResponder,
