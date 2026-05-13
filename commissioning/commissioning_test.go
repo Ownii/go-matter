@@ -118,6 +118,40 @@ func TestPASE_InstallsSecureSession_Commissioner(t *testing.T) {
 	}
 }
 
+func TestPASE_InstallsSecureSession_Commissionee(t *testing.T) {
+	const passcode = uint32(12345678)
+	commissioner, commissionee, commissionerSM, commissioneeSM, err := pasePair(t, passcode, passcode)
+	if err != nil {
+		t.Fatalf("PASE handshake: %v", err)
+	}
+
+	commSess, ok := commissionerSM.Session(commissioner.SessionID)
+	if !ok {
+		t.Fatalf("commissioner session not installed (Task 3 precondition)")
+	}
+	devSess, ok := commissioneeSM.Session(commissionee.SessionID)
+	if !ok {
+		t.Fatalf("commissionee session %d not installed", commissionee.SessionID)
+	}
+
+	if devSess.LocalNodeID != session.UnspecifiedNodeID || devSess.PeerNodeID != session.UnspecifiedNodeID {
+		t.Errorf("PASE NodeIDs must be UnspecifiedNodeID, got local=%d peer=%d", devSess.LocalNodeID, devSess.PeerNodeID)
+	}
+
+	if !bytes.Equal(commSess.EncryptKey, devSess.DecryptKey) {
+		t.Errorf("commissioner EncryptKey must mirror commissionee DecryptKey (I2R): %x vs %x",
+			commSess.EncryptKey, devSess.DecryptKey)
+	}
+	if !bytes.Equal(commSess.DecryptKey, devSess.EncryptKey) {
+		t.Errorf("commissioner DecryptKey must mirror commissionee EncryptKey (R2I): %x vs %x",
+			commSess.DecryptKey, devSess.EncryptKey)
+	}
+	if !bytes.Equal(commSess.AttestationChallenge, devSess.AttestationChallenge) {
+		t.Errorf("AttestationChallenge must match across peers: %x vs %x",
+			commSess.AttestationChallenge, devSess.AttestationChallenge)
+	}
+}
+
 func TestPASE_WrongPasscode(t *testing.T) {
 	commissioner, commissionee, _, _, err := pasePair(t, 12345678, 99999999)
 	if err == nil {
