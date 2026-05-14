@@ -1,0 +1,3 @@
+[submodule "matter-specs"]
+	path = matter-specs
+	url = https://github.com/project-chip/connectedhomeip.git
