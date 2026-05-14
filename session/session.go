@@ -18,6 +18,15 @@ import (
 // exists in the session table for it.
 const UnsecuredSessionID uint16 = 0
 
+// UnspecifiedNodeID is the value used for both local and peer Node IDs
+// when installing a PASE-secure session. PASE runs before fabric
+// provisioning, so neither side has an operational Node ID yet; the
+// reference implementation (connectedhomeip's SecureSessionTable.cpp)
+// explicitly rejects any other value for kPASE sessions. The zero is
+// also what flows into the AES-CCM nonce on the secure-session send
+// path (connectedhomeip SessionManager.cpp:286-289).
+const UnspecifiedNodeID uint64 = 0
+
 // MessageCounterWindowSize is the unicast-secured replay window per Matter
 // §4.5.4.2 (matches CHIP_CONFIG_MESSAGE_COUNTER_WINDOW_SIZE).
 const MessageCounterWindowSize uint32 = 32

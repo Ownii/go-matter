@@ -8,6 +8,7 @@ import (
 
 	"go-matter/crypto"
 	"go-matter/message"
+	"go-matter/session"
 )
 
 // Commissioner drives the PASE handshake from the controller (initiator) side.
@@ -17,6 +18,7 @@ import (
 type Commissioner struct {
 	State          CommissioningState
 	Messenger      CommissioningMessenger
+	sessionManager *session.SessionManager
 	Passcode       uint32
 	Random         []byte
 	SessionID      uint16
@@ -36,8 +38,14 @@ type Commissioner struct {
 	prover *crypto.SPAKE2PProver
 }
 
-func NewCommissioner(messenger CommissioningMessenger) *Commissioner {
-	return &Commissioner{State: StateIdle, Messenger: messenger}
+// NewCommissioner constructs a Commissioner. sm must not be nil — PASE
+// produces a secure session which is installed in sm after Pake2; passing
+// nil panics immediately rather than nil-derefing mid-handshake.
+func NewCommissioner(messenger CommissioningMessenger, sm *session.SessionManager) *Commissioner {
+	if sm == nil {
+		panic("commissioning: NewCommissioner requires a non-nil SessionManager")
+	}
+	return &Commissioner{State: StateIdle, Messenger: messenger, sessionManager: sm}
 }
 
 func (c *Commissioner) StartPASE(passcode uint32) error {
@@ -141,6 +149,10 @@ func (c *Commissioner) handlePake2(frame *message.Frame) error {
 	}
 	if c.Ke, err = c.prover.SharedKey(); err != nil {
 		return err
+	}
+
+	if err := installPASESession(c.sessionManager, c.SessionID, c.Ke, session.RoleInitiator); err != nil {
+		return fmt.Errorf("commissioner: %w", err)
 	}
 
 	out, err := c.buildFrame(message.OpcodePASEPake3, frame.Header.MessageCounter, &Pake3{CA: cA})

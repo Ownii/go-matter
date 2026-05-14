@@ -7,6 +7,7 @@ import (
 
 	"go-matter/commissioning"
 	"go-matter/message"
+	"go-matter/session"
 	"go-matter/transport"
 )
 
@@ -27,8 +28,9 @@ func (m *deviceMessenger) SendMessage(frame *message.Frame) error {
 func main() {
 	const devicePort = 5540
 
+	sm := session.NewSessionManager(nil)
 	commissionee, err := commissioning.NewCommissionee(
-		12345678, []byte("SPAKE2P Key Salt"), 1000)
+		12345678, []byte("SPAKE2P Key Salt"), 1000, sm)
 	if err != nil {
 		panic(err)
 	}
@@ -55,6 +57,12 @@ func main() {
 		}
 		fmt.Printf("Commissionee state=%d sessionID=%d responderRandom=%x\n",
 			commissionee.State, commissionee.SessionID, commissionee.Random)
+		if commissionee.State == commissioning.StateComplete {
+			if s, ok := sm.Session(commissionee.SessionID); ok {
+				fmt.Printf("Commissionee installed PASE-secure session id=%d attestationPrefix=%x\n",
+					commissionee.SessionID, s.AttestationChallenge[:4])
+			}
+		}
 	})
 	if err != nil {
 		fmt.Printf("Transport error: %v\n", err)

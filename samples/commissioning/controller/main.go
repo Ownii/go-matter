@@ -7,6 +7,7 @@ import (
 
 	"go-matter/commissioning"
 	"go-matter/message"
+	"go-matter/session"
 	"go-matter/transport"
 )
 
@@ -30,7 +31,8 @@ func main() {
 	}
 	defer tm.Close()
 
-	commissioner := commissioning.NewCommissioner(&controllerMessenger{tm: tm, deviceAddr: deviceAddr})
+	sm := session.NewSessionManager(nil)
+	commissioner := commissioning.NewCommissioner(&controllerMessenger{tm: tm, deviceAddr: deviceAddr}, sm)
 
 	go func() {
 		fmt.Printf("Controller listening on %d...\n", ctrlPort)
@@ -45,6 +47,12 @@ func main() {
 			fmt.Printf("Commissioner state=%d salt=%x iterations=%d responderSessionID=%d\n",
 				commissioner.State, commissioner.Salt, commissioner.Iterations,
 				commissioner.ResponderSessionID)
+			if commissioner.State == commissioning.StateComplete {
+				if s, ok := sm.Session(commissioner.SessionID); ok {
+					fmt.Printf("Commissioner installed PASE-secure session id=%d attestationPrefix=%x\n",
+						commissioner.SessionID, s.AttestationChallenge[:4])
+				}
+			}
 		}); err != nil {
 			fmt.Printf("Transport error: %v\n", err)
 		}

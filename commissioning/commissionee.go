@@ -7,6 +7,7 @@ import (
 
 	"go-matter/crypto"
 	"go-matter/message"
+	"go-matter/session"
 )
 
 // Commissionee drives the PASE handshake from the device (responder) side.
@@ -21,6 +22,7 @@ type Commissionee struct {
 	Random     []byte
 
 	Messenger      CommissioningMessenger
+	sessionManager *session.SessionManager
 	SessionID      uint16
 	MessageCounter uint32
 
@@ -35,17 +37,21 @@ type Commissionee struct {
 	verifier *crypto.SPAKE2PVerifier
 }
 
-func NewCommissionee(passcode uint32, salt []byte, iterations int) (*Commissionee, error) {
+func NewCommissionee(passcode uint32, salt []byte, iterations int, sm *session.SessionManager) (*Commissionee, error) {
+	if sm == nil {
+		return nil, errors.New("commissionee: session manager must not be nil")
+	}
 	w0, L, err := crypto.ComputeSPAKE2PVerifierData(passcode, salt, iterations)
 	if err != nil {
 		return nil, fmt.Errorf("commissionee: derive verifier: %w", err)
 	}
 	return &Commissionee{
-		State:      StateIdle,
-		Salt:       append([]byte(nil), salt...),
-		Iterations: uint32(iterations),
-		W0:         w0,
-		L:          L,
+		State:          StateIdle,
+		sessionManager: sm,
+		Salt:           append([]byte(nil), salt...),
+		Iterations:     uint32(iterations),
+		W0:             w0,
+		L:              L,
 	}, nil
 }
 
@@ -146,6 +152,11 @@ func (c *Commissionee) handlePake3(frame *message.Frame) error {
 		return err
 	}
 	c.Ke = ke
+
+	if err := installPASESession(c.sessionManager, c.SessionID, c.Ke, session.RoleResponder); err != nil {
+		return fmt.Errorf("commissionee: %w", err)
+	}
+
 	c.State = StateComplete
 	return nil
 }
